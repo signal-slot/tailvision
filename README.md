@@ -2,6 +2,10 @@
 
 Eyes and a finger for AI agents on a device's physical screen.
 
+> **Status (2026-10-07):** work in progress. Builds, unit tests and the SD
+> image pipeline work; nothing has been verified on real hardware yet
+> (camera capture, screen detection on real frames, USB gadget, hotspot).
+
 A Raspberry Pi Zero W with a camera module points at the LCD of a board under
 development, and plugs into that board's USB port as a touch screen, a
 keyboard and a network adapter. An AI agent (Claude Code, or anything that
