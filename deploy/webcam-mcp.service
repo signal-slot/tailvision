@@ -1,0 +1,25 @@
+[Unit]
+Description=tailvision: MCP server returning webcam snapshots, with setup page and hotspot fallback
+# Start as soon as NetworkManager is up. Do not wait for network-online or
+# cloud-init: on a Zero W the first boot's cloud-init run takes five minutes,
+# and this service is what makes the unit reachable in the first place.
+After=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/bin/tailvision --device /dev/video0
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=info
+# Runs as root: it drives NetworkManager (nmcli), hostnamectl and the tailscale
+# CLI. Everything else is locked down; the access key lives in StateDirectory.
+StateDirectory=tailvision
+ProtectSystem=strict
+# Status file and Wi-Fi country live on the boot partition.
+ReadWritePaths=/boot/firmware
+ProtectHome=yes
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

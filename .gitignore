@@ -1,0 +1,5 @@
+/target
+*.jpg
+/build
+/deploy/image.env
+/.claude/

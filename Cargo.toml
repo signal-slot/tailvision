@@ -1,0 +1,25 @@
+[package]
+name = "tailvision"
+version = "0.1.0"
+edition = "2024"
+description = "Eyes and a finger for AI agents on a device's physical screen: a camera module and a USB touch/keyboard gadget on a Raspberry Pi Zero W, served over MCP"
+license = "MIT"
+rust-version = "1.90"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+imageproc = "0.27"
+jpeg-encoder = "0.7.1"
+libc = "0.2.190"
+rmcp = { version = "3.5.0", features = ["server", "transport-streamable-http-server"] }
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_urlencoded = "0.7.1"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "signal", "process", "time", "fs", "io-util", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

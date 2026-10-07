@@ -1,0 +1,16 @@
+[Unit]
+Description=Join the tailnet with the auth key left on the boot partition
+After=network-online.target tailscaled.service cloud-init.target
+Wants=network-online.target tailscaled.service
+ConditionPathExists=/boot/firmware/tailscale-authkey
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=15
+ExecStart=/bin/sh -c 'tailscale up --ssh --auth-key="$(tr -d "[:space:]" < /boot/firmware/tailscale-authkey)" && rm -f /boot/firmware/tailscale-authkey'
+
+[Install]
+WantedBy=multi-user.target

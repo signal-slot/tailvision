@@ -1,0 +1,20 @@
+# Cross-compile for Raspberry Pi Zero / Zero W (ARMv6, hard-float) as a fully
+# static musl binary, linked with the rust-lld shipped in the toolchain so no
+# external cross-GCC is needed:
+#
+#   rustup target add arm-unknown-linux-musleabihf
+#   cargo build --release --target arm-unknown-linux-musleabihf
+[target.arm-unknown-linux-musleabihf]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=ld.lld",
+    "-C", "link-self-contained=yes",
+    "-C", "target-feature=+crt-static",
+    "-C", "target-cpu=arm1176jzf-s",
+]
+
+[profile.release]
+strip = true
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
