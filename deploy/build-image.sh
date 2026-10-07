@@ -115,12 +115,17 @@ parted -s "$out" resizepart 2 100%
 loop="$(sudo losetup -Pf --show "$out")"
 bootmnt="$(mktemp -d)"
 rootmnt="$(mktemp -d)"
+finished=0
 cleanup() {
     set +e
     sudo umount "$bootmnt" 2>/dev/null
     sudo umount "$rootmnt" 2>/dev/null
     sudo losetup -d "$loop" 2>/dev/null
     rmdir "$bootmnt" "$rootmnt" 2>/dev/null
+    if [ "$finished" = 0 ]; then
+        echo "!! build failed, removing the half-built $out" >&2
+        rm -f "$out"
+    fi
 }
 trap cleanup EXIT
 
@@ -238,6 +243,7 @@ for unit in tailvision.service tailscaled.service tailscale-firstboot.service; d
 done
 
 sync
+finished=1
 cleanup
 trap - EXIT
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=tailvision: MCP server returning webcam snapshots, with setup page and hotspot fallback
+Description=tailvision: camera KVM for AI agents over MCP, with setup page and hotspot fallback
 # Start as soon as NetworkManager is up. Do not wait for network-online or
 # cloud-init: on a Zero W the first boot's cloud-init run takes five minutes,
 # and this service is what makes the unit reachable in the first place.
