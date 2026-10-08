@@ -460,10 +460,11 @@ pub async fn hostname() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// dnsmasq options for the setup hotspot: `<hostname>.local` and the OS
-/// connectivity-probe names (`web::CAPTIVE_PROBE_HOSTS`) resolve to the
-/// unit's hotspot address, so the probes reach the setup page and a phone
-/// that joins the hotspot opens its "sign in to network" window there. Every
+/// dnsmasq options for the setup hotspot: `<hostname>`, `<hostname>.local`
+/// and the OS connectivity-probe names (`web::CAPTIVE_PROBE_HOSTS`) resolve
+/// to the unit's hotspot address, so `http://<hostname>/` works there as it
+/// does on the tailnet, and the probes reach the setup page: a phone that
+/// joins the hotspot opens its "sign in to network" window there. Every
 /// other name goes to the real upstream DNS.
 pub const LOCAL_DNS_CONF: &str = "/etc/NetworkManager/dnsmasq-shared.d/tailvision.conf";
 
@@ -473,7 +474,8 @@ pub fn write_local_dns(hostname: &str) {
     let probes = crate::web::CAPTIVE_PROBE_HOSTS
         .iter()
         .map(|h| h.to_string());
-    for name in std::iter::once(format!("{hostname}.local")).chain(probes) {
+    let own = [hostname.to_string(), format!("{hostname}.local")];
+    for name in own.into_iter().chain(probes) {
         text.push_str(&format!("interface-name={name},wlan0\n"));
     }
     match std::fs::read_to_string(LOCAL_DNS_CONF) {

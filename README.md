@@ -109,8 +109,8 @@ Port 80.
    hotspot is up.
 3. Join it from a phone or laptop. The "sign in to network" window that
    phones and laptops show for a network without Internet access opens the
-   setup page; if it does not appear, open `http://tailvision-xxxx.local/`
-   (or `http://10.42.0.1/`). Being on the hotspot counts as physical access,
+   setup page; if it does not appear, open `http://tailvision-xxxx/`
+   (or `http://tailvision-xxxx.local/`, or `http://10.42.0.1/`). Being on the hotspot counts as physical access,
    so the page needs no key there.
 4. On the page:
    - **Wi-Fi**: pick a network, enter the password, Join. The Zero W has one
