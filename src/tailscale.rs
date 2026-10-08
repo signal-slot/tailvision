@@ -160,13 +160,16 @@ impl Login {
         }
     }
 
-    /// Starts `tailscale up --json` in the background and waits briefly for the
-    /// login URL. Returns the URL if it arrived in time.
     /// Forgets a login link from before a logout.
     pub async fn reset(&self) {
         *self.inner.lock().await = LoginState::default();
     }
 
+    /// Starts `tailscale up --json` in the background; the login URL it prints
+    /// shows up in `view`. The process runs until the login completes: the
+    /// unit is back on the hotspot (no Internet) while the user approves the
+    /// link elsewhere, and only "Go online" lets tailscaled pick up the
+    /// approval, so no timeout here, or the link dies before it can be used.
     pub async fn start(self: &Arc<Self>) -> Result<Option<String>> {
         {
             let mut s = self.inner.lock().await;
@@ -178,7 +181,7 @@ impl Login {
             s.last_error = None;
         }
         let mut child = Command::new("tailscale")
-            .args(["up", "--reset", "--ssh", "--json", "--timeout", "600s"])
+            .args(["up", "--reset", "--ssh", "--json"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

@@ -172,7 +172,7 @@ pub async fn index(
             ));
             if let Some(url) = &p.auth_url {
                 h.push_str(&format!(
-                    "<p>1. Open this link on a phone or PC that is on the Internet and approve the unit:<br><a href=\"{0}\">{0}</a></p>",
+                    "<p>1. Approve the unit by opening this link on a device that is on the Internet. A phone on this hotspot has no Internet, so use another device, or copy the link and open it after leaving the hotspot:<br><a href=\"{0}\">{0}</a></p>",
                     esc(url)
                 ));
             }
@@ -305,7 +305,7 @@ pub async fn index(
         ));
     }
     if let Some(url) = login.auth_url.as_deref().or(ts.auth_url.as_deref()) {
-        h.push_str(&format!("<p class=msg>Open this link on any device to approve the node:<br><a href=\"{0}\">{0}</a></p>", esc(url)));
+        h.push_str(&format!("<p class=msg>Approve the node by opening this link on a device that is on the Internet (not a phone on this hotspot):<br><a href=\"{0}\">{0}</a></p>", esc(url)));
     } else if login.running {
         h.push_str("<p class=msg>Waiting for Tailscale to produce a login link; reload in a few seconds.</p>");
     }

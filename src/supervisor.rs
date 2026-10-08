@@ -193,7 +193,10 @@ pub async fn join(app: App, ssid: String, psk: String) {
 
 /// "Go online" from the web form: leaves the hotspot for the network joined
 /// before and waits for Tailscale to come up (the user approved the link in
-/// the meantime). If that does not happen the hotspot comes back with a note.
+/// the meantime; tailscaled completes the login once it has Internet again).
+/// If the login attempt is no longer running it is started again, which
+/// yields a fresh link. If Tailscale does not come up the hotspot comes back
+/// with a note and the current link.
 pub async fn go_online(app: App) {
     let Some(mut p) = app.net.provisioning.lock().await.clone() else {
         return;
@@ -210,7 +213,11 @@ pub async fn go_online(app: App) {
         app.net.switching.store(false, Ordering::SeqCst);
         return;
     }
-    let running = wait_for(Duration::from_secs(90), || async {
+    if !tailscale::status().await.is_running() && !app.login.view().await.running {
+        tracing::info!("go online: no login in progress; starting one");
+        let _ = app.login.start().await;
+    }
+    let running = wait_for(Duration::from_secs(120), || async {
         tailscale::status().await.is_running()
     })
     .await;
@@ -220,9 +227,15 @@ pub async fn go_online(app: App) {
         *app.net.hotspot_since.lock().await = None;
     } else {
         let ts = tailscale::status().await;
-        p.auth_url = ts.auth_url.clone().or(p.auth_url);
+        p.auth_url = app
+            .login
+            .view()
+            .await
+            .auth_url
+            .or(ts.auth_url.clone())
+            .or(p.auth_url);
         p.note = Some(
-            "Wi-Fi is up but Tailscale is not logged in yet. Open the link, approve the unit, then press Go online again."
+            "Wi-Fi is up but Tailscale is not logged in yet. Approve the link below from a device that is on the Internet, then press Go online again."
                 .into(),
         );
         tracing::info!("go online: Tailscale not running yet; back to the hotspot");
