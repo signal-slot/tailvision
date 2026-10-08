@@ -19,7 +19,7 @@ through a camera, the input through USB.
 
 ```
 AI agent ──(Tailscale / HTTP)──▶ Pi Zero W: tailvision ──(CSI)──▶ camera module ──▶ target's LCD
-                                       │     └──(USB, one cable)──▶ target: touch + keyboard + Ethernet + power
+                                       │     └──(USB, one cable)──▶ target: touch + keyboard + power
 phone / PC ──(Wi-Fi or setup hotspot)──▶ setup page http://tailvision-xxxx.local/
 ```
 
@@ -91,7 +91,7 @@ inserted, YUYV encoded on the Pi, the first `skip_frames` frames dropped).
 | `/debug.jpg`  | Raw frame with the detected outline drawn on                   |
 | `/shot.jpg`  | Raw frame, `?w=1280&h=720&skip=10&q=85`, for curl and browsers |
 | `/mcp`       | MCP (Streamable HTTP)                                          |
-| anything else | redirects to `/`. On the hotspot and the USB link the OS connectivity probes land here too, so joining the hotspot pops up the "sign in to network" window on the setup page |
+| anything else | redirects to `/`. On the hotspot the OS connectivity probes land here too, so joining it pops up the "sign in to network" window on the setup page |
 
 Port 80.
 
@@ -110,10 +110,8 @@ Port 80.
 3. Join it from a phone or laptop. The "sign in to network" window that
    phones and laptops show for a network without Internet access opens the
    setup page; if it does not appear, open `http://tailvision-xxxx.local/`
-   (or `http://10.42.0.1/`). The same page is reachable over the USB cable from
-   the machine the unit is plugged into, at `http://tailvision-xxxx.local/` or
-   `http://10.42.1.1/`, so a PC or SBC on the USB side can do the setup
-   without Wi-Fi at all. Both links count as physical access and need no key.
+   (or `http://10.42.0.1/`). Being on the hotspot counts as physical access,
+   so the page needs no key there.
 4. On the page:
    - **Wi-Fi**: pick a network, enter the password, Join. The Zero W has one
      radio, so the hotspot goes away for about a minute: the unit joins the
@@ -139,7 +137,7 @@ Port 80.
      agent as `calibrate_camera`.
    - **Tailscale, log out**: shown once the unit is logged in. Removes the
      unit from the tailnet so it can be re-provisioned or handed on; after
-     that it is reachable only on the hotspot or the USB link.
+     that it is reachable only on the hotspot.
    - **Access key**: shown on the page together with the exact `claude mcp add`
      command. "Generate a new key" rotates it.
 5. Carried out of Wi-Fi range, the unit raises the hotspot again after 90
@@ -212,7 +210,7 @@ or in `.mcp.json`:
 - Raspberry Pi Camera Module 3 (autofocus, good for 10–20 cm) or Module 2 /
   OV5647 (fixed focus), with the 22-pin Zero camera ribbon cable.
 - A micro-B to USB-A cable from the port marked **USB** to the device under
-  test. That one cable carries power, touch, keyboard and USB Ethernet.
+  test. That one cable carries power, touch and keyboard.
   To keep the unit alive while the target is power-cycled, feed **PWR IN**
   from a separate supply and put a Schottky diode in the VBUS line of the
   target cable so the unit does not back-feed 5 V into it.
@@ -227,12 +225,17 @@ a host and touch/keyboard are unavailable).
 ### What the device under test sees
 
 A composite USB device: a single-touch digitizer (absolute, 0..32767 on
-both axes, mapped by the target to its own display), a boot-protocol
-keyboard, and a CDC ECM network adapter. The unit hands the target an
-address on 10.42.1.0/24 and NATs it to its Wi-Fi, so the target can reach
-the internet and the unit can reach the target (SSH, ADB) at the address the
-target picked. Linux, Android, macOS and most RTOS USB stacks need no driver;
-Windows needs an RNDIS variant (not built yet).
+both axes, mapped by the target to its own display) and a boot-protocol
+keyboard. Nothing else by default: the unit is not a network adapter for the
+target, and there is no network path between the two. Linux, Android, macOS,
+Windows and most RTOS USB stacks need no driver for either.
+
+For debugging, a CDC ECM network adapter can be added: create the file
+`usb-ethernet` on the boot partition (`USB_ETHERNET=1` in `image.env` does
+that), or run with `--usb-ethernet`. The unit then hands the target an
+address on 10.42.1.0/24 and NATs it to its Wi-Fi, so the unit can reach the
+target (SSH, ADB) at the address the target picked. Delete the file to turn it
+off. Windows would need an RNDIS variant (not built).
 
 ## Building
 
@@ -263,7 +266,7 @@ the hotspot) and a Tailscale auth key (optional). Nothing else is baked in by
 default, so the image can be handed to someone else; `deploy/image.env.example`
 lists what can be added (your SSH key, a per-unit hotspot password, ...).
 
-No sshd runs on LAN or the USB link unless the builder put an SSH key in
+No sshd runs on LAN unless the builder put an SSH key in
 `image.env` (development units); password login over SSH is never enabled.
 Maintenance access on a plain unit is Tailscale SSH, which the tailnet's ACL
 controls, and the setup page.

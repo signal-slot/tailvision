@@ -120,9 +120,16 @@ pub struct Cli {
     /// Extra rpicam-still arguments, e.g. "--hflip --vflip" or "--shutter 20000".
     #[arg(long, default_value = "")]
     pub csi_args: String,
-    /// Do not set up the USB gadget (touch screen, keyboard, Ethernet) even if a UDC exists.
+    /// Do not set up the USB gadget (touch screen, keyboard) even if a UDC exists.
     #[arg(long)]
     pub no_gadget: bool,
+    /// Debugging: also expose a USB Ethernet (CDC ECM) link to the device under test,
+    /// 10.42.1.0/24 with NAT to Wi-Fi, so the unit can reach the target (SSH, ADB).
+    #[arg(long)]
+    pub usb_ethernet: bool,
+    /// The USB Ethernet link is also enabled while this file exists.
+    #[arg(long, default_value = "/boot/firmware/usb-ethernet")]
+    pub usb_ethernet_file: PathBuf,
 }
 
 #[derive(Clone)]
@@ -745,10 +752,11 @@ async fn main() -> anyhow::Result<()> {
     let hostname = std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| PRODUCT_NAME.into());
+    let usb_ethernet = cli.usb_ethernet || cli.usb_ethernet_file.exists();
     let gadget = if cli.no_gadget {
         None
     } else {
-        match gadget::Gadget::setup(PRODUCT_NAME, &hostname) {
+        match gadget::Gadget::setup(PRODUCT_NAME, &hostname, usb_ethernet) {
             Ok(Some(g)) => Some(Arc::new(g)),
             Ok(None) => {
                 tracing::info!(
@@ -785,7 +793,8 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(h) = netmgr::hostname().await {
         netmgr::write_local_dns(&h);
     }
-    if gadget.is_some() {
+    if gadget.is_some() && usb_ethernet {
+        tracing::info!("debugging USB Ethernet link enabled");
         tokio::spawn(netmgr::ensure_usb_ethernet());
     }
 

@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::Ordering;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Form, Query, Request, State};
@@ -27,7 +26,7 @@ pub async fn require_key(State(app): State<App>, req: Request<Body>, next: Next)
     let from_local_link = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| on_local_link(ci.0.ip()))
+        .map(|ci| on_hotspot(ci.0.ip()))
         .unwrap_or(false);
     let auth = req
         .headers()
@@ -65,19 +64,16 @@ pub async fn require_key(State(app): State<App>, req: Request<Body>, next: Next)
     }
 }
 
-/// Clients on the setup hotspot (10.42.0.0/24) or on the USB Ethernet link
-/// toward the device under test (10.42.1.0/24) may use the setup page without
-/// the key: both need physical access to the unit. The Pi's own addresses
-/// (.1) are excluded so a request forwarded from elsewhere does not qualify.
-fn on_local_link(ip: std::net::IpAddr) -> bool {
+/// Clients on the setup hotspot (10.42.0.0/24) may use the setup page without
+/// the key: whoever is on it has physical access to the unit. The Pi's own
+/// address (.1) is excluded so a request forwarded from elsewhere does not qualify.
+fn on_hotspot(ip: IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
+        IpAddr::V4(v4) => {
             let o = v4.octets();
-            o[0] == 10 && o[1] == 42 && (o[2] == 0 || o[2] == 1) && o[3] != 1
+            o[0] == 10 && o[1] == 42 && o[2] == 0 && o[3] != 1
         }
-        std::net::IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .is_some_and(|v4| on_local_link(v4.into())),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(|v4| on_hotspot(v4.into())),
     }
 }
 
@@ -241,7 +237,7 @@ pub async fn index(
             crate::capture::Backend::V4l2 => format!("UVC webcam {}", app.cli.device),
         }),
         if app.gadget.is_some() {
-            "gadget active (touch, keyboard, Ethernet)"
+            "gadget active (touch, keyboard)"
         } else {
             "off (port in host mode or no cable)"
         }
@@ -303,7 +299,7 @@ pub async fn index(
     if ts.is_running() {
         h.push_str(&format!(
             "<p>Logged in as <b>{}</b> ({}).</p>\
-             <form method=post action='/setup/tailscale/logout' onsubmit=\"return confirm('Leave the tailnet? The unit is then reachable only on the hotspot or USB link until it logs in again.')\"><button>Log out</button> <span class=muted>removes this unit from the tailnet</span></form>",
+             <form method=post action='/setup/tailscale/logout' onsubmit=\"return confirm('Leave the tailnet? The unit is then reachable only on the hotspot until it logs in again.')\"><button>Log out</button> <span class=muted>removes this unit from the tailnet</span></form>",
             esc(ts.dns_name.as_deref().unwrap_or("?")),
             esc(&ts.ips.join(", "))
         ));
@@ -514,9 +510,9 @@ pub async fn key_generate(State(app): State<App>) -> Redirect {
 // ------------------------------------------------------------------ captive portal
 
 /// Names the operating systems resolve right after joining a network to find
-/// out whether it reaches the Internet. dnsmasq on the hotspot and the USB
-/// link answers them with the unit's own address (`netmgr::write_local_dns`),
-/// so the probes land in `fallback`. Nothing else is hijacked.
+/// out whether it reaches the Internet. dnsmasq on the hotspot answers them
+/// with the unit's own address (`netmgr::write_local_dns`), so the probes
+/// land in `fallback`. Nothing else is hijacked.
 pub const CAPTIVE_PROBE_HOSTS: &[&str] = &[
     "connectivitycheck.gstatic.com",
     "connectivitycheck.android.com",
@@ -531,47 +527,18 @@ pub const CAPTIVE_PROBE_HOSTS: &[&str] = &[
     "networkcheck.kde.org",
 ];
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Link {
-    Hotspot,
-    Usb,
-}
+/// The unit's address on the hotspot.
+const HOTSPOT_ADDRESS: &str = "10.42.0.1";
 
-impl Link {
-    /// Which of the unit's shared links a client address is on.
-    fn of(ip: IpAddr) -> Option<Link> {
-        if !on_local_link(ip) {
-            return None;
-        }
-        let v4 = match ip {
-            IpAddr::V4(v4) => v4,
-            IpAddr::V6(v6) => v6.to_ipv4_mapped()?,
-        };
-        Some(if v4.octets()[2] == 0 {
-            Link::Hotspot
-        } else {
-            Link::Usb
-        })
-    }
-
-    /// The unit's address on that link.
-    fn gateway(self) -> &'static str {
-        match self {
-            Link::Hotspot => "10.42.0.1",
-            Link::Usb => "10.42.1.1",
-        }
-    }
-}
-
-/// Where a client on one of the shared links is sent for the setup page:
+/// Where a client on the hotspot is sent for the setup page:
 /// `http://<hostname>.local/`, so the address bar shows the unit's name.
-/// dnsmasq answers that name on both links (`netmgr::write_local_dns`) and
+/// dnsmasq answers that name on the hotspot (`netmgr::write_local_dns`) and
 /// avahi does over mDNS, which is how Apple devices resolve `.local`. The
 /// address is the fallback if the hostname cannot be read.
-fn portal_url(hostname: Option<&str>, link: Link) -> String {
+fn portal_url(hostname: Option<&str>) -> String {
     match hostname.map(str::trim).filter(|h| !h.is_empty()) {
         Some(h) => format!("http://{h}.local/"),
-        None => format!("http://{}/", link.gateway()),
+        None => format!("http://{HOTSPOT_ADDRESS}/"),
     }
 }
 
@@ -580,58 +547,17 @@ fn kernel_hostname() -> Option<String> {
     std::fs::read_to_string("/proc/sys/kernel/hostname").ok()
 }
 
-fn host_header(headers: &HeaderMap) -> String {
-    headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.split(':').next())
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase()
-}
-
-/// The reply a connectivity probe takes as "the network is fine".
-fn probe_success(host: &str) -> Response {
-    match host {
-        "captive.apple.com" => {
-            Html("<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>")
-                .into_response()
-        }
-        "www.msftconnecttest.com" => "Microsoft Connect Test".into_response(),
-        "www.msftncsi.com" => "Microsoft NCSI".into_response(),
-        "detectportal.firefox.com" => "success\n".into_response(),
-        "nmcheck.gnome.org" => "NetworkManager is online\n".into_response(),
-        "connectivity-check.ubuntu.com" => (
-            StatusCode::NO_CONTENT,
-            [("x-networkmanager-status", "online")],
-        )
-            .into_response(),
-        _ => StatusCode::NO_CONTENT.into_response(),
-    }
-}
-
-/// Anything unknown lands on the setup page. The OS connectivity probes
-/// (`CAPTIVE_PROBE_HOSTS`) get an answer that depends on the link: on the
-/// hotspot a redirect to the page, which is what makes a phone or laptop
-/// open its "sign in to network" window there; on the USB link the reply the
-/// probe expects while the unit is online (the device under test really is
-/// on the Internet through it), otherwise the same redirect so the page is
-/// one tap away there too. The redirect goes to `http://<hostname>.local/`
-/// rather than back to the probe's own host name, which only resolves to the
-/// unit while the client stays on that link.
-pub async fn fallback(
-    State(app): State<App>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    let host = host_header(&headers);
-    let probe = CAPTIVE_PROBE_HOSTS.contains(&host.as_str());
-    match Link::of(peer.ip()) {
-        Some(Link::Usb) if probe && app.net.online.load(Ordering::Relaxed) => probe_success(&host),
-        Some(link) => {
-            Redirect::temporary(&portal_url(kernel_hostname().as_deref(), link)).into_response()
-        }
-        None => Redirect::temporary("/").into_response(),
+/// Anything unknown lands on the setup page. For a client on the hotspot the
+/// redirect goes to `http://<hostname>.local/`: that is what makes a phone or
+/// laptop open its "sign in to network" window there when its connectivity
+/// probe (`CAPTIVE_PROBE_HOSTS`) arrives, and it does not send the browser
+/// back to the probe's own host name, which only resolves to the unit while
+/// the client stays on the hotspot.
+pub async fn fallback(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Redirect {
+    if on_hotspot(peer.ip()) {
+        Redirect::temporary(&portal_url(kernel_hostname().as_deref()))
+    } else {
+        Redirect::temporary("/")
     }
 }
 
@@ -656,43 +582,23 @@ mod tests {
 
     #[test]
     fn hotspot_subnet() {
-        assert!(on_local_link("10.42.0.23".parse().unwrap()));
-        assert!(on_local_link("::ffff:10.42.0.23".parse().unwrap()));
-        assert!(!on_local_link("10.42.0.1".parse().unwrap()));
-        assert!(on_local_link("10.42.1.7".parse().unwrap()));
-        assert!(!on_local_link("10.42.1.1".parse().unwrap()));
-        assert!(!on_local_link("10.42.2.7".parse().unwrap()));
-        assert!(!on_local_link("192.168.1.5".parse().unwrap()));
+        assert!(on_hotspot("10.42.0.23".parse().unwrap()));
+        assert!(on_hotspot("::ffff:10.42.0.23".parse().unwrap()));
+        assert!(!on_hotspot("10.42.0.1".parse().unwrap()));
+        assert!(!on_hotspot("10.42.1.7".parse().unwrap()));
+        assert!(!on_hotspot("100.64.0.9".parse().unwrap()));
+        assert!(!on_hotspot("192.168.1.5".parse().unwrap()));
     }
 
     #[test]
-    fn links_and_probes() {
-        assert_eq!(Link::of("10.42.0.23".parse().unwrap()), Some(Link::Hotspot));
+    fn portal_target() {
         assert_eq!(
-            Link::of("::ffff:10.42.1.9".parse().unwrap()),
-            Some(Link::Usb)
-        );
-        assert_eq!(Link::of("10.42.0.1".parse().unwrap()), None);
-        assert_eq!(Link::of("100.64.0.9".parse().unwrap()), None);
-        assert_eq!(Link::Usb.gateway(), "10.42.1.1");
-        assert_eq!(
-            portal_url(Some("tailvision-d84d\n"), Link::Hotspot),
+            portal_url(Some("tailvision-d84d\n")),
             "http://tailvision-d84d.local/"
         );
-        assert_eq!(portal_url(None, Link::Usb), "http://10.42.1.1/");
-        assert_eq!(portal_url(Some(""), Link::Hotspot), "http://10.42.0.1/");
-        let mut h = HeaderMap::new();
-        h.insert(
-            header::HOST,
-            HeaderValue::from_static("Captive.Apple.com:80"),
-        );
-        assert_eq!(host_header(&h), "captive.apple.com");
-        assert!(CAPTIVE_PROBE_HOSTS.contains(&host_header(&h).as_str()));
-        assert_eq!(
-            probe_success("connectivitycheck.gstatic.com").status(),
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(probe_success("captive.apple.com").status(), StatusCode::OK);
+        assert_eq!(portal_url(None), "http://10.42.0.1/");
+        assert_eq!(portal_url(Some("")), "http://10.42.0.1/");
+        assert!(CAPTIVE_PROBE_HOSTS.contains(&"captive.apple.com"));
     }
 
     #[test]

@@ -206,7 +206,14 @@ if [ -n "$HOTSPOT_PASSWORD" ]; then
     # binary's default applies.
     printf '%s\n' "$HOTSPOT_PASSWORD" | sudo tee "$bootmnt/hotspot-password" >/dev/null
 fi
-# sshd listens on LAN and the USB link only when the builder supplied a key
+if [ -n "${USB_ETHERNET:-}" ]; then
+    # Debugging: tailvision adds a USB Ethernet function to the gadget while
+    # this marker exists.
+    sudo touch "$bootmnt/usb-ethernet"
+else
+    sudo rm -f "$bootmnt/usb-ethernet"
+fi
+# sshd listens on LAN only when the builder supplied a key
 # (development units). Everything else uses Tailscale SSH, which is gated by
 # the tailnet's ACL, or the setup page. Raspberry Pi OS enables sshd when
 # this marker file exists, so it is created only in that case.
@@ -215,11 +222,11 @@ if [ -n "$ssh_pubkey" ]; then
 else
     sudo rm -f "$bootmnt/ssh"
 fi
-# USB port in peripheral (gadget) mode: touch screen + keyboard + Ethernet for
+# USB port in peripheral (gadget) mode: touch screen + keyboard for
 # the device under test, which also powers the unit. Comment this out to use a
 # USB webcam on the port instead.
 if ! grep -q 'dr_mode=peripheral' "$bootmnt/config.txt"; then
-    printf '\n# tailvision: USB gadget mode (touch, keyboard, Ethernet to the device under test)\n[all]\ndtoverlay=dwc2,dr_mode=peripheral\n' | sudo tee -a "$bootmnt/config.txt" >/dev/null
+    printf '\n# tailvision: USB gadget mode (touch screen and keyboard for the device under test)\n[all]\ndtoverlay=dwc2,dr_mode=peripheral\n' | sudo tee -a "$bootmnt/config.txt" >/dev/null
 fi
 # Wi-Fi regulatory domain: the kernel parameter is what raspi-config sets, and
 # the file lets tailvision re-apply it and lift the rfkill block itself.

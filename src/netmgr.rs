@@ -6,7 +6,6 @@ use tokio::process::Command;
 
 pub const HOTSPOT_CONNECTION: &str = "tailvision-hotspot";
 /// NetworkManager connection for the USB Ethernet gadget toward the device under test.
-pub const USB_CONNECTION: &str = "tailvision-usb";
 pub const HOTSPOT_ADDRESS: &str = "10.42.0.1";
 
 #[derive(Debug, Clone, Default)]
@@ -90,7 +89,7 @@ pub async fn wifi_status(iface: &str) -> Result<WifiStatus> {
     Ok(status)
 }
 
-/// Whether any interface (Ethernet, USB adapter, ...) other than the hotspot is up.
+/// Whether any interface (Wi-Fi client, Ethernet adapter, ...) other than the hotspot is up.
 pub async fn any_online() -> Result<bool> {
     let out = nmcli(&["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "dev", "status"]).await?;
     Ok(out.lines().map(split_terse).any(|f| {
@@ -99,7 +98,7 @@ pub async fn any_online() -> Result<bool> {
             && f[1] != "loopback"
             && f[1] != "tun"
             && f[3] != HOTSPOT_CONNECTION
-            // The USB link toward the device under test is a shared
+            // The debugging USB link toward the device under test is a shared
             // (downstream) network, not a way out.
             && f[3] != USB_CONNECTION
     }))
@@ -406,8 +405,12 @@ pub async fn radio_on() {
     let _ = nmcli(&["radio", "wifi", "on"]).await;
 }
 
+/// NetworkManager connection for the debugging USB Ethernet link.
+pub const USB_CONNECTION: &str = "tailvision-usb";
+
 /// Hands the device under test an address on the USB Ethernet gadget link
-/// (and NAT to the internet through Wi-Fi). Idempotent.
+/// (and NAT to the Internet through Wi-Fi). Debugging only: lets the unit
+/// reach the target (SSH, ADB) over the cable. Idempotent.
 pub async fn ensure_usb_ethernet() {
     let existing = nmcli(&["-t", "-f", "NAME", "con", "show"])
         .await
@@ -457,28 +460,21 @@ pub async fn hostname() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// dnsmasq options for the networks the unit shares (hotspot and USB link):
-/// `<hostname>.local` and the OS connectivity-probe names
-/// (`web::CAPTIVE_PROBE_HOSTS`) resolve to the unit's address on the link the
-/// query came in on, so the probes reach the setup page and a phone that
-/// joins the hotspot opens its "sign in to network" window there. Every other
-/// name goes to the real upstream DNS, so a device under test that reaches
-/// the Internet through the unit is not hijacked.
+/// dnsmasq options for the setup hotspot: `<hostname>.local` and the OS
+/// connectivity-probe names (`web::CAPTIVE_PROBE_HOSTS`) resolve to the
+/// unit's hotspot address, so the probes reach the setup page and a phone
+/// that joins the hotspot opens its "sign in to network" window there. Every
+/// other name goes to the real upstream DNS.
 pub const LOCAL_DNS_CONF: &str = "/etc/NetworkManager/dnsmasq-shared.d/tailvision.conf";
 
 pub fn write_local_dns(hostname: &str) {
-    let mut text = String::from(
-        "# Written by tailvision on start and when the hostname changes.\n\
-         # Each name resolves to the unit's address on the link the query arrived on.\n\
-         localise-queries\n",
-    );
+    let mut text =
+        String::from("# Written by tailvision on start and when the hostname changes.\n");
     let probes = crate::web::CAPTIVE_PROBE_HOSTS
         .iter()
         .map(|h| h.to_string());
     for name in std::iter::once(format!("{hostname}.local")).chain(probes) {
-        for iface in ["wlan0", "usb0"] {
-            text.push_str(&format!("interface-name={name},{iface}\n"));
-        }
+        text.push_str(&format!("interface-name={name},wlan0\n"));
     }
     match std::fs::read_to_string(LOCAL_DNS_CONF) {
         Ok(cur) if cur == text => return,

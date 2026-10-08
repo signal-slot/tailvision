@@ -1,5 +1,8 @@
 //! USB gadget: the unit plugs into the device under test and shows up as a
-//! touch screen, a keyboard and a USB Ethernet adapter (configfs/libcomposite).
+//! touch screen and a keyboard (configfs/libcomposite). A USB Ethernet (CDC
+//! ECM) function can be added for debugging (`--usb-ethernet`, or the marker
+//! file on the boot partition); by default the unit is not a network adapter
+//! for the device under test.
 //!
 //! Needs `dtoverlay=dwc2,dr_mode=peripheral` and the `libcomposite` module.
 //! `dwc2` is deliberately kept from auto-loading (deploy/modprobe-gadget.conf)
@@ -163,7 +166,9 @@ fn hidg_node(function_dir: &Path) -> Result<PathBuf> {
 
 impl Gadget {
     /// Builds and binds the gadget, or returns Ok(None) when there is no UDC.
-    pub fn setup(product: &str, serial: &str) -> Result<Option<Gadget>> {
+    /// `usb_ethernet` adds the CDC ECM function (debugging only; the link
+    /// itself is configured by `netmgr::ensure_usb_ethernet`).
+    pub fn setup(product: &str, serial: &str, usb_ethernet: bool) -> Result<Option<Gadget>> {
         let Some(udc) = load_udc() else {
             return Ok(None);
         };
@@ -186,7 +191,11 @@ impl Gadget {
             fs::create_dir_all(g.join("configs/c.1/strings/0x409"))?;
             write(
                 g.join("configs/c.1/strings/0x409/configuration"),
-                "touch + keyboard + ethernet",
+                if usb_ethernet {
+                    "touch + keyboard + ethernet"
+                } else {
+                    "touch + keyboard"
+                },
             )?;
             write(g.join("configs/c.1/MaxPower"), "500")?;
 
@@ -204,13 +213,16 @@ impl Gadget {
             write(kbd.join("report_length"), KEYBOARD_REPORT_LEN.to_string())?;
             write(kbd.join("report_desc"), KEYBOARD_REPORT_DESC)?;
 
-            let ecm = g.join("functions/ecm.usb0");
-            fs::create_dir_all(&ecm)?;
-            let (dev_addr, host_addr) = mac_pair();
-            write(ecm.join("dev_addr"), &dev_addr)?;
-            write(ecm.join("host_addr"), &host_addr)?;
-
-            for f in ["hid.touch", "hid.keyboard", "ecm.usb0"] {
+            let mut functions = vec!["hid.touch", "hid.keyboard"];
+            if usb_ethernet {
+                let ecm = g.join("functions/ecm.usb0");
+                fs::create_dir_all(&ecm)?;
+                let (dev_addr, host_addr) = mac_pair();
+                write(ecm.join("dev_addr"), &dev_addr)?;
+                write(ecm.join("host_addr"), &host_addr)?;
+                functions.push("ecm.usb0");
+            }
+            for f in functions {
                 std::os::unix::fs::symlink(
                     g.join("functions").join(f),
                     g.join("configs/c.1").join(f),
