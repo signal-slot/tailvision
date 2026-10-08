@@ -826,8 +826,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/tailscale/key", post(web::tailscale_key))
         .route("/api/tailscale/login", post(web::tailscale_login))
         .route("/api/tailscale/logout", post(web::tailscale_logout))
-        .route("/api/camera/calibrate", post(web::camera_calibrate))
-        .route("/api/camera/unlock", post(web::camera_unlock))
         .route("/api/key/generate", post(web::key_generate))
         .nest_service("/mcp", mcp)
         .fallback(web::fallback)

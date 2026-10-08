@@ -130,12 +130,6 @@ Port 80.
      Tailscale name and the hotspot name all follow.
    - **Tailscale**: "Get a login link" shows a URL to approve the node from any
      device. An auth key works too.
-   - **Camera** (CSI module only): "Calibrate and lock" runs autofocus,
-     auto-exposure and auto white balance once on the lit screen and freezes
-     the result. Every later screenshot uses the same settings, so images are
-     consistent, there is no settling delay, and autofocus cannot hunt on a
-     dark UI. "Back to automatic" undoes it. The same is available to the
-     agent as `calibrate_camera`.
    - **Tailscale, log out**: shown once the unit is logged in. Removes the
      unit from the tailnet so it can be re-provisioned or handed on; after
      that it is reachable only on the hotspot.

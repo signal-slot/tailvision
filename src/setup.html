@@ -58,12 +58,6 @@ ul{padding-left:1.2rem}li{margin:.15rem 0}a{color:var(--accent)}
 <form id="f-ts-login" class="row"><button type="submit">Get a login link</button> <span class="muted">needs Internet access</span></form>
 <form id="f-ts-key"><label>or an auth key<br><input type="password" id="authkey" placeholder="tskey-auth-…" autocomplete="off"></label> <button type="submit">Join with key</button></form>
 
-<div id="camera-sec" hidden>
-<h2>Camera</h2>
-<p id="camera-lock"></p>
-<div class="row"><button id="cal">Calibrate and lock</button> <button id="uncal">Back to automatic</button></div>
-<p class="muted">Point the camera at the lit screen first. Calibration takes a few seconds; afterwards every screenshot uses the same focus, exposure and white balance.</p>
-</div>
 
 <h2>Access key</h2>
 <div id="key"></div>
@@ -180,8 +174,6 @@ function render() {
     else { lo.dataset.armed = '1'; lo.textContent = 'Leave the tailnet? Click again to confirm'; setTimeout(() => { delete lo.dataset.armed; lo.textContent = 'Log out'; }, 5000); }
   };
 
-  $('#camera-sec').hidden = !s.camera.csi;
-  $('#camera-lock').innerHTML = s.camera.lock ? `Locked: <b>${esc(s.camera.lock)}</b>` : 'Automatic focus, exposure and white balance (slower, and the picture can change between shots).';
 
   if (s.key) {
     const bearer = ` \\\n  --header "Authorization: Bearer ${esc(s.key)}"`;
@@ -204,8 +196,6 @@ $('#rescan').onclick = e => act('/api/wifi/rescan', {}, e.target);
 $('#f-host').onsubmit = e => { e.preventDefault(); act('/api/hostname', {hostname: $('#hostname-in').value.trim()}, e.submitter); };
 $('#f-ts-login').onsubmit = e => { e.preventDefault(); act('/api/tailscale/login', {}, e.submitter); };
 $('#f-ts-key').onsubmit = e => { e.preventDefault(); act('/api/tailscale/key', {authkey: $('#authkey').value.trim()}, e.submitter).then(ok => { if (ok) $('#authkey').value = ''; }); };
-$('#cal').onclick = e => act('/api/camera/calibrate', {}, e.target);
-$('#uncal').onclick = e => act('/api/camera/unlock', {}, e.target);
 $('#keygen').onclick = e => {
   if (e.target.dataset.armed) { act('/api/key/generate', {}, e.target); delete e.target.dataset.armed; e.target.textContent = 'Generate a new key'; }
   else { e.target.dataset.armed = '1'; e.target.textContent = 'Click again to replace the key'; setTimeout(() => { delete e.target.dataset.armed; e.target.textContent = 'Generate a new key'; }, 5000); }

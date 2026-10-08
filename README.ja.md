@@ -115,10 +115,6 @@ UI 要素の広がりから作り、縦横比、大きさ、表示内容をど�
      ホットスポット名が追従する。
    - **Tailscale**: 「Get a login link」でログイン URL が出るので、どの端末からでも
      開いて承認する。auth key でも可。
-   - **Camera**(CSI モジュールのみ): 「Calibrate and lock」で点灯中の画面に
-     向けて AF・AE・AWB を 1 回だけ走らせ、結果を固定する。以後の撮影は全て
-     同じ設定になり、毎回の収束待ちも、暗い UI での AF の迷いも無くなる。
-     「Back to automatic」で戻せる。エージェントからは `calibrate_camera`。
    - **Tailscale の Log out**: ログイン済みのときに出る。本機を tailnet から
      外す(再設定や譲渡用)。以後はホットスポットからしか届かない。
    - **Access key**: ページに `claude mcp add` のコマンドごと表示される。

@@ -187,8 +187,6 @@ struct TailscaleJson {
 #[derive(serde::Serialize)]
 struct CameraJson {
     backend: String,
-    csi: bool,
-    lock: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -219,7 +217,6 @@ pub async fn api_state(
     let ts = tailscale::status().await;
     let login = app.login.view().await;
     let cfg = app.config.read().await.clone();
-    let csi = matches!(app.backend, crate::capture::Backend::Csi { .. });
     let local = format!("http://{hostname}.local");
     Json(StateJson {
         urls: UrlsJson {
@@ -281,8 +278,6 @@ pub async fn api_state(
                 ),
                 crate::capture::Backend::V4l2 => format!("UVC webcam {}", app.cli.device),
             },
-            csi,
-            lock: cfg.camera_lock.as_ref().map(|l| l.to_string()),
         },
         gadget: app.gadget.is_some(),
         key: cfg.mcp_key,
@@ -439,20 +434,6 @@ async fn save_key(app: &App, key: Option<String>) -> Result<(), String> {
     app.store.save(&cfg).map_err(|e| format!("{e:#}"))?;
     *app.config.write().await = cfg;
     Ok(())
-}
-
-pub async fn camera_calibrate(State(app): State<App>) -> ActionResult {
-    match app.camera.calibrate().await {
-        Ok((lock, _)) => done(format!("camera locked: {lock}")),
-        Err(e) => fail(format!("calibration failed: {e:#}")),
-    }
-}
-
-pub async fn camera_unlock(State(app): State<App>) -> ActionResult {
-    match app.camera.unlock().await {
-        Ok(()) => done("camera back to automatic"),
-        Err(e) => fail(format!("{e:#}")),
-    }
 }
 
 pub async fn key_generate(State(app): State<App>) -> ActionResult {
