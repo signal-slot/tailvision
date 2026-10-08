@@ -165,8 +165,8 @@ users:
 $passwd_lines
 $key_lines
 
-enable_ssh: true
-ssh_pwauth: $([ -n "$PASSWORD" ] && echo true || echo false)
+enable_ssh: $([ -n "$ssh_pubkey" ] && echo true || echo false)
+ssh_pwauth: false
 
 runcmd:
   # Belt and braces for the Wi-Fi regulatory domain / rfkill on first boot.
@@ -206,8 +206,15 @@ if [ -n "$HOTSPOT_PASSWORD" ]; then
     # binary's default applies.
     printf '%s\n' "$HOTSPOT_PASSWORD" | sudo tee "$bootmnt/hotspot-password" >/dev/null
 fi
-# Raspberry Pi OS also enables sshd when this marker file exists; harmless duplicate of enable_ssh.
-sudo touch "$bootmnt/ssh"
+# sshd listens on LAN and the USB link only when the builder supplied a key
+# (development units). Everything else uses Tailscale SSH, which is gated by
+# the tailnet's ACL, or the setup page. Raspberry Pi OS enables sshd when
+# this marker file exists, so it is created only in that case.
+if [ -n "$ssh_pubkey" ]; then
+    sudo touch "$bootmnt/ssh"
+else
+    sudo rm -f "$bootmnt/ssh"
+fi
 # USB port in peripheral (gadget) mode: touch screen + keyboard + Ethernet for
 # the device under test, which also powers the unit. Comment this out to use a
 # USB webcam on the port instead.
@@ -230,6 +237,7 @@ sudo install -m 644 "$ts_dir/systemd/tailscaled.service" "$rootmnt/etc/systemd/s
 sudo install -m 644 "$ts_dir/systemd/tailscaled.defaults" "$rootmnt/etc/default/tailscaled"
 sudo install -m 644 "$root/deploy/tailscale-firstboot.service" "$rootmnt/etc/systemd/system/tailscale-firstboot.service"
 sudo install -m 644 "$root/deploy/modules-gadget.conf" "$rootmnt/etc/modules-load.d/tailvision-gadget.conf"
+sudo install -m 644 "$root/deploy/modprobe-gadget.conf" "$rootmnt/etc/modprobe.d/tailvision-gadget.conf"
 sudo install -d "$rootmnt/etc/systemd/journald.conf.d"
 sudo install -m 644 "$root/deploy/journald-persistent.conf" "$rootmnt/etc/systemd/journald.conf.d/tailvision.conf"
 sudo install -d "$rootmnt/etc/NetworkManager/dnsmasq-shared.d"

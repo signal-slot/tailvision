@@ -20,7 +20,7 @@ through a camera, the input through USB.
 ```
 AI agent ──(Tailscale / HTTP)──▶ Pi Zero W: tailvision ──(CSI)──▶ camera module ──▶ target's LCD
                                        │     └──(USB, one cable)──▶ target: touch + keyboard + Ethernet + power
-phone / PC ──(Wi-Fi or setup hotspot)──▶ setup page http://tailvision.local/
+phone / PC ──(Wi-Fi or setup hotspot)──▶ setup page http://tailvision-xxxx.local/
 ```
 
 ## What you get
@@ -84,7 +84,7 @@ inserted, YUYV encoded on the Pi, the first `skip_frames` frames dropped).
 | `/debug.jpg`  | Raw frame with the detected outline drawn on                   |
 | `/shot.jpg`  | Raw frame, `?w=1280&h=720&skip=10&q=85`, for curl and browsers |
 | `/mcp`       | MCP (Streamable HTTP)                                          |
-| anything else | redirects to `/` (so phones' captive-portal prompts land there) |
+| anything else | redirects to `/`                                               |
 
 Port 80.
 
@@ -93,16 +93,30 @@ Port 80.
 1. Flash the image, plug in the camera and power, switch on. The very first
    boot of a Zero W takes about 7 minutes (partition resize, reboot, then a
    slow cloud-init run); later boots take about a minute.
-2. If no known Wi-Fi is reachable 60 seconds after boot, the unit raises the
-   Wi-Fi network **`tailvision-setup`** (WPA2, password **`tailvision-setup`**
-   unless the unit shipped with its own, see below). The LED blinks fast.
-3. Join it from a phone or laptop and open `http://tailvision.local/`. While the
-   hotspot is up every name resolves to the unit, and phones usually offer
-   their "sign in to network" prompt, which leads to the same page.
+2. On its first start the unit names itself **`tailvision-xxxx`**, `xxxx`
+   being the last four hex digits of its Wi-Fi MAC (print them on the label),
+   so several units have distinct mDNS, hotspot and Tailscale names. About a
+   minute after power-on it raises its own Wi-Fi network
+   **`tailvision-xxxx-setup`** (WPA2, password **`tailvision-setup`** unless
+   the unit shipped with its own, see below). The LED blinks fast while the
+   hotspot is up.
+3. Join it from a phone or laptop and open `http://tailvision-xxxx.local/`
+   (or `http://10.42.0.1/`). The same page is reachable over the USB cable from
+   the machine the unit is plugged into, at `http://tailvision-xxxx.local/` or
+   `http://10.42.1.1/`, so a PC or SBC on the USB side can do the setup
+   without Wi-Fi at all. Both links count as physical access and need no key.
 4. On the page:
-   - **Wi-Fi**: pick a network, enter the password, Join. The hotspot drops and
-     the unit joins that network; move your phone to the same network and
-     reopen `http://tailvision.local/`. If the hotspot is back within two
+   - **Wi-Fi**: pick a network, enter the password, Join. The Zero W has one
+     radio, so the hotspot goes away for about a minute: the unit joins the
+     network, checks that it can reach the Internet and asks Tailscale for a
+     login link, then the hotspot **comes back** and the result is shown at
+     the top of the page: the network works (or why not), the Tailscale link
+     to approve, and the access key to note down. Approve the link from any
+     device on the Internet, press **Go online**, and the unit switches over
+     for good; the LED turns solid once it is on Tailscale. If Tailscale is
+     not up two minutes later the hotspot returns with a note. (Alternatively
+     move your phone to that network and
+     reopen `http://tailvision-xxxx.local/`. If the hotspot is back within two
      minutes the password was wrong.
    - **Hostname**: rename when you run several units. The `.local` name, the
      Tailscale name and the hotspot name all follow.
@@ -114,6 +128,9 @@ Port 80.
      consistent, there is no settling delay, and autofocus cannot hunt on a
      dark UI. "Back to automatic" undoes it. The same is available to the
      agent as `calibrate_camera`.
+   - **Tailscale, log out**: shown once the unit is logged in. Removes the
+     unit from the tailnet so it can be re-provisioned or handed on; after
+     that it is reachable only on the hotspot or the USB link.
    - **Image**: default rotation (0/90/180/270) and mirroring of the returned
      screenshot, for a camera mounted sideways or upside down. Tool calls that
      pass their own `rotation_degrees`/flips override it.
@@ -181,7 +198,7 @@ or in `.mcp.json`:
 ```
 
 `tailvision` resolves through Tailscale MagicDNS from anywhere, and
-`tailvision.local` through mDNS on the same LAN.
+`tailvision-xxxx.local` through mDNS on the same LAN.
 
 ## Hardware
 
@@ -240,6 +257,11 @@ the hotspot) and a Tailscale auth key (optional). Nothing else is baked in by
 default, so the image can be handed to someone else; `deploy/image.env.example`
 lists what can be added (your SSH key, a per-unit hotspot password, ...).
 
+No sshd runs on LAN or the USB link unless the builder put an SSH key in
+`image.env` (development units); password login over SSH is never enabled.
+Maintenance access on a plain unit is Tailscale SSH, which the tailnet's ACL
+controls, and the setup page.
+
 Flash with Raspberry Pi Imager ("Use custom", answer No to OS customisation) or:
 
 ```bash
@@ -273,6 +295,15 @@ tailvision [--bind 0.0.0.0:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
 ```
 
 `RUST_LOG=debug` for more logging.
+
+## Wi-Fi notes
+
+- The hotspot is WPA2 with plain PSK on purpose. With NetworkManager 1.52
+  the access point would also offer PSK-SHA256 in the handshake, but the
+  Zero W's Wi-Fi firmware writes its own beacon and only advertises PSK;
+  every client then rejects the handshake (phones say "wrong password").
+  tailvision pins the running access point to WPA-PSK right after it starts.
+- The Zero W is 2.4 GHz only. A network that is 5 GHz only is invisible to it.
 
 ## Pointing a camera at an LCD
 

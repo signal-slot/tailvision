@@ -12,7 +12,7 @@ if [ ! -x "$bin" ]; then
     exit 1
 fi
 
-scp "$bin" "$dir/deploy/tailvision.service" "$dir/deploy/dnsmasq-hotspot.conf" "$dir/deploy/journald-persistent.conf" "$dir/deploy/modules-gadget.conf" "$host:/tmp/"
+scp "$bin" "$dir/deploy/tailvision.service" "$dir/deploy/dnsmasq-hotspot.conf" "$dir/deploy/journald-persistent.conf" "$dir/deploy/modules-gadget.conf" "$dir/deploy/modprobe-gadget.conf" "$host:/tmp/"
 ssh "$host" 'set -e
     sudo install -m 755 /tmp/tailvision /usr/local/bin/tailvision
     sudo install -m 644 /tmp/tailvision.service /etc/systemd/system/tailvision.service
@@ -21,6 +21,7 @@ ssh "$host" 'set -e
     sudo install -d /etc/systemd/journald.conf.d
     sudo install -m 644 /tmp/journald-persistent.conf /etc/systemd/journald.conf.d/tailvision.conf
     sudo install -m 644 /tmp/modules-gadget.conf /etc/modules-load.d/tailvision-gadget.conf
+    sudo install -m 644 /tmp/modprobe-gadget.conf /etc/modprobe.d/tailvision-gadget.conf
     grep -q "dr_mode=peripheral" /boot/firmware/config.txt || printf "\n[all]\ndtoverlay=dwc2,dr_mode=peripheral\n" | sudo tee -a /boot/firmware/config.txt >/dev/null
     rm -f /tmp/tailvision /tmp/tailvision.service /tmp/dnsmasq-hotspot.conf /tmp/journald-persistent.conf /tmp/modules-gadget.conf
     sudo systemctl daemon-reload

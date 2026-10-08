@@ -22,10 +22,10 @@ use crate::{netmgr, supervisor, tailscale};
 pub async fn require_key(State(app): State<App>, req: Request<Body>, next: Next) -> Response {
     let key = app.config.read().await.mcp_key.clone().unwrap_or_default();
     let path = req.uri().path();
-    let from_hotspot = req
+    let from_local_link = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| on_hotspot_subnet(ci.0.ip()))
+        .map(|ci| on_local_link(ci.0.ip()))
         .unwrap_or(false);
     let auth = req
         .headers()
@@ -38,7 +38,7 @@ pub async fn require_key(State(app): State<App>, req: Request<Body>, next: Next)
             || (path == "/shot.jpg"
                 && query_param(req.uri().query(), "key").as_deref() == Some(key.as_str()))
     } else {
-        from_hotspot || basic_password(auth).as_deref() == Some(key.as_str())
+        from_local_link || basic_password(auth).as_deref() == Some(key.as_str())
     };
     if ok {
         return next.run(req).await;
@@ -63,16 +63,19 @@ pub async fn require_key(State(app): State<App>, req: Request<Body>, next: Next)
     }
 }
 
-/// The hotspot hands out 10.42.0.0/24; the Pi itself is 10.42.0.1.
-fn on_hotspot_subnet(ip: std::net::IpAddr) -> bool {
+/// Clients on the setup hotspot (10.42.0.0/24) or on the USB Ethernet link
+/// toward the device under test (10.42.1.0/24) may use the setup page without
+/// the key: both need physical access to the unit. The Pi's own addresses
+/// (.1) are excluded so a request forwarded from elsewhere does not qualify.
+fn on_local_link(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
-            o[0] == 10 && o[1] == 42 && o[2] == 0 && o[3] != 1
+            o[0] == 10 && o[1] == 42 && (o[2] == 0 || o[2] == 1) && o[3] != 1
         }
         std::net::IpAddr::V6(v6) => v6
             .to_ipv4_mapped()
-            .is_some_and(|v4| on_hotspot_subnet(v4.into())),
+            .is_some_and(|v4| on_local_link(v4.into())),
     }
 }
 
@@ -145,6 +148,51 @@ pub async fn index(
     }
     if let Some(e) = &net_err {
         h.push_str(&format!("<p class='msg err'>Network: {}</p>", esc(e)));
+    }
+
+    // ---- result of the last Join, awaiting "Go online"
+    if let Some(p) = app.net.provisioning.lock().await.clone() {
+        if let Some(e) = &p.error {
+            h.push_str(&format!(
+                "<div class='msg err'><b>Join failed.</b> {} Check the password and try again below.</div>",
+                esc(e)
+            ));
+        } else if p.tailscale_running {
+            h.push_str(&format!(
+                "<div class=msg><b>Wi-Fi \"{}\" works</b>{} and the unit is already on Tailscale, so it stays on that network.</div>",
+                esc(&p.ssid),
+                p.ip.as_deref().map(|ip| format!(" ({})", esc(ip))).unwrap_or_default()
+            ));
+        } else {
+            h.push_str(&format!(
+                "<div class=msg><p><b>Wi-Fi \"{}\" works</b>{}. Internet access: <b>{}</b>.</p>",
+                esc(&p.ssid),
+                p.ip.as_deref()
+                    .map(|ip| format!(" ({})", esc(ip)))
+                    .unwrap_or_default(),
+                if p.internet { "yes" } else { "no" }
+            ));
+            if let Some(url) = &p.auth_url {
+                h.push_str(&format!(
+                    "<p>1. Open this link on a phone or PC that is on the Internet and approve the unit:<br><a href=\"{0}\">{0}</a></p>",
+                    esc(url)
+                ));
+            }
+            if let Some(k) = &key {
+                h.push_str(&format!(
+                    "<p>2. Note the access key; you need it to register the unit in Claude Code: <code>{}</code></p>",
+                    esc(k)
+                ));
+            }
+            if let Some(n) = &p.note {
+                h.push_str(&format!("<p class=err>{}</p>", esc(n)));
+            }
+            h.push_str(
+                "<p>3. <form method=post action='/setup/go-online' style='display:inline'><button>Go online</button></form> \
+                 The hotspot goes away; the LED turns solid once the unit is on Tailscale. If something is missing, the hotspot returns within two minutes with a note here. \
+                 <form method=post action='/setup/cancel' style='display:inline'><button>Cancel</button></form></p></div>",
+            );
+        }
     }
 
     // ---- status
@@ -239,16 +287,12 @@ pub async fn index(
         }
         h.push_str("</ul>");
     }
-    h.push_str("<p class=muted>Joining drops the setup hotspot. Reconnect your phone or PC to the same network and open <code>http://");
-    h.push_str(&esc(&hostname));
-    h.push_str(
-        ".local/</code>. If the hotspot comes back within two minutes, the password was wrong.</p>",
-    );
+    h.push_str("<p class=muted>Join takes the hotspot down for about a minute: the unit joins the network, checks Internet access and fetches a Tailscale login link, then this hotspot comes back and the result appears at the top of this page. (A unit that is already on Tailscale just stays on the new network.)</p>");
 
     // ---- hostname
     h.push_str(&format!(
         "<h2>Hostname</h2><form method=post action='/setup/hostname'><input type=text name=hostname value=\"{}\" pattern='[A-Za-z0-9-]+'> <button>Rename</button>\
-         <p class=muted>Used for <code>.local</code>, the Tailscale name and the hotspot name (<code>&lt;hostname&gt;-setup</code>).</p></form>",
+         <p class=muted>Used for <code>.local</code>, the Tailscale name and the hotspot name (<code>&lt;hostname&gt;-setup</code>; until it is changed from the default the hotspot also carries four digits of the unit's Wi-Fi MAC).</p></form>",
         esc(&hostname)
     ));
 
@@ -256,7 +300,8 @@ pub async fn index(
     h.push_str("<h2>Tailscale</h2>");
     if ts.is_running() {
         h.push_str(&format!(
-            "<p>Logged in as <b>{}</b> ({}).</p>",
+            "<p>Logged in as <b>{}</b> ({}).</p>\
+             <form method=post action='/setup/tailscale/logout' onsubmit=\"return confirm('Leave the tailnet? The unit is then reachable only on the hotspot or USB link until it logs in again.')\"><button>Log out</button> <span class=muted>removes this unit from the tailnet</span></form>",
             esc(ts.dns_name.as_deref().unwrap_or("?")),
             esc(&ts.ips.join(", "))
         ));
@@ -358,8 +403,21 @@ pub async fn wifi(State(app): State<App>, Form(f): Form<WifiForm>) -> Redirect {
     }
     tokio::spawn(supervisor::join(app, ssid.clone(), f.psk));
     back(&format!(
-        "joining \"{ssid}\"; reconnect to that network and reload"
+        "joining \"{ssid}\"; the hotspot goes away for about a minute and comes back with the result"
     ))
+}
+
+pub async fn go_online(State(app): State<App>) -> Redirect {
+    if app.net.provisioning.lock().await.is_none() {
+        return back("nothing to go online with; join a network first");
+    }
+    tokio::spawn(supervisor::go_online(app));
+    back("going online; the hotspot goes away now")
+}
+
+pub async fn cancel(State(app): State<App>) -> Redirect {
+    supervisor::cancel_provisioning(&app).await;
+    back("cancelled")
 }
 
 #[derive(serde::Deserialize)]
@@ -406,12 +464,28 @@ pub struct AuthKeyForm {
     authkey: String,
 }
 
-pub async fn tailscale_key(Form(f): Form<AuthKeyForm>) -> Redirect {
+pub async fn tailscale_key(State(app): State<App>, Form(f): Form<AuthKeyForm>) -> Redirect {
     if f.authkey.trim().is_empty() {
         return back("auth key is empty");
     }
+    if !netmgr::any_online().await.unwrap_or(false) {
+        // No way out yet (we are probably on the hotspot): keep the key and
+        // let the supervisor use it once Wi-Fi is up.
+        *app.net.pending_auth_key.lock().await = Some(f.authkey.trim().to_string());
+        return back("auth key stored; it is used as soon as the unit is online");
+    }
     match tailscale::up_with_key(&f.authkey).await {
         Ok(()) => back("joined the tailnet"),
+        Err(e) => back(&format!("{e:#}")),
+    }
+}
+
+pub async fn tailscale_logout(State(app): State<App>) -> Redirect {
+    match tailscale::logout().await {
+        Ok(()) => {
+            app.login.reset().await;
+            back("logged out of Tailscale")
+        }
         Err(e) => back(&format!("{e:#}")),
     }
 }
@@ -511,10 +585,13 @@ mod tests {
 
     #[test]
     fn hotspot_subnet() {
-        assert!(on_hotspot_subnet("10.42.0.23".parse().unwrap()));
-        assert!(on_hotspot_subnet("::ffff:10.42.0.23".parse().unwrap()));
-        assert!(!on_hotspot_subnet("10.42.0.1".parse().unwrap()));
-        assert!(!on_hotspot_subnet("192.168.1.5".parse().unwrap()));
+        assert!(on_local_link("10.42.0.23".parse().unwrap()));
+        assert!(on_local_link("::ffff:10.42.0.23".parse().unwrap()));
+        assert!(!on_local_link("10.42.0.1".parse().unwrap()));
+        assert!(on_local_link("10.42.1.7".parse().unwrap()));
+        assert!(!on_local_link("10.42.1.1".parse().unwrap()));
+        assert!(!on_local_link("10.42.2.7".parse().unwrap()));
+        assert!(!on_local_link("192.168.1.5".parse().unwrap()));
     }
 
     #[test]

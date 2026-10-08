@@ -17,7 +17,7 @@ Raspberry Pi Zero W にカメラモジュールを載せて開発中のボード
 ```
 AI エージェント ──(Tailscale / HTTP)──▶ Pi Zero W: tailvision ──(CSI)──▶ カメラモジュール ──▶ 対象の液晶
                                             │     └──(USB ケーブル 1 本)──▶ 対象機: タッチ + キーボード + Ethernet + 給電
-スマホ / PC ──(Wi-Fi またはセットアップ用ホットスポット)──▶ 設定ページ http://tailvision.local/
+スマホ / PC ──(Wi-Fi またはセットアップ用ホットスポット)──▶ 設定ページ http://tailvision-xxxx.local/
 ```
 
 ## 特徴
@@ -83,16 +83,26 @@ UI 要素の広がりから作り、縦横比、大きさ、表示内容をど�
 ## 初回起動
 
 1. イメージを焼き、カメラと電源をつないで起動する。
-2. 起動後 60 秒たっても既知の Wi-Fi が無ければ、Wi-Fi **`tailvision-setup`**
-   (WPA2、パスワード **`tailvision-setup`**。個体ごとのパスワード付きで
-   出荷したものはラベルの値)を出す。LED は速い点滅になる。
-3. スマホか PC でそれにつなぎ `http://tailvision.local/` を開く。ホットスポット中は
-   全ての名前が本機に解決されるので、スマホの「ネットワークにログイン」通知からも
-   同じページに着く。
+2. 初回起動時に本機は自分を **`tailvision-xxxx`**(xxxx は Wi-Fi MAC の
+   下 4 桁。ラベルに印字する)と名付ける。これで複数台あっても mDNS 名、
+   ホットスポット名、Tailscale 名が重ならない。電源投入から 1 分ほどで本機
+   自身の Wi-Fi **`tailvision-xxxx-setup`**(WPA2、パスワード
+   **`tailvision-setup`**。個体ごとのパスワード付きで出荷したものはラベルの値)
+   が出る。ホットスポット中は LED が速い点滅。
+3. スマホか PC でそれにつなぎ `http://tailvision-xxxx.local/`(または
+   `http://10.42.0.1/`)を開く。USB で挿した側の PC や SBC からも同じページに
+   `http://tailvision-xxxx.local/` または `http://10.42.1.1/` で届くので、Wi-Fi 無しで
+   設定を済ませることもできる。どちらも物理的に触れる相手なので鍵は不要。
 4. 設定ページで:
-   - **Wi-Fi**: 一覧から選んでパスワードを入れて Join。ホットスポットが落ちて
-     その Wi-Fi に入るので、スマホも同じ Wi-Fi に戻して `http://tailvision.local/`
-     を開き直す。2 分以内にホットスポットが復活したらパスワード違い。
+   - **Wi-Fi**: 一覧から選んでパスワードを入れて Join。Zero W は無線が 1 本
+     なのでホットスポットは 1 分ほど消える。その間に本機はその Wi-Fi に入り、
+     インターネットに出られるか確かめ、Tailscale のログイン用リンクを取って
+     くる。そして**ホットスポットが戻ってきて**、ページの先頭に結果が出る:
+     Wi-Fi が使えたか(駄目なら理由)、承認する Tailscale のリンク、控えておく
+     アクセスキー。リンクをインターネットにつながった端末で開いて承認し、
+     **Go online** を押すと本機はその Wi-Fi に切り替わり、Tailscale に入ると
+     LED が点灯になる。2 分たっても入れなければホットスポットが理由付きで
+     戻ってくる。
    - **Hostname**: 複数台あるときに変える。`.local` 名、Tailscale 名、
      ホットスポット名が追従する。
    - **Tailscale**: 「Get a login link」でログイン URL が出るので、どの端末からでも
@@ -101,6 +111,8 @@ UI 要素の広がりから作り、縦横比、大きさ、表示内容をど�
      向けて AF・AE・AWB を 1 回だけ走らせ、結果を固定する。以後の撮影は全て
      同じ設定になり、毎回の収束待ちも、暗い UI での AF の迷いも無くなる。
      「Back to automatic」で戻せる。エージェントからは `calibrate_camera`。
+   - **Tailscale の Log out**: ログイン済みのときに出る。本機を tailnet から
+     外す(再設定や譲渡用)。以後はホットスポットか USB リンクからしか届かない。
    - **Image**: 返す画像の既定の回転(0/90/180/270)と鏡像。カメラを横や
      逆さに取り付けたときに使う。ツール呼び出しで `rotation_degrees` や
      flip を指定すればそちらが優先。
@@ -151,7 +163,7 @@ claude mcp add --transport http tailvision http://tailvision/mcp \
 }
 ```
 
-`tailvision` は Tailscale の MagicDNS でどこからでも、`tailvision.local` は同じ LAN の
+`tailvision-xxxx` は Tailscale の MagicDNS でどこからでも、`tailvision-xxxx.local` は同じ LAN の
 mDNS で引ける。
 
 ## ハードウェア
@@ -205,6 +217,10 @@ deploy/build-image.sh            # → build/tailvision.img、約 1 分
 入れ、ホスト名とユーザーの cloud-init 設定を書く。Wi-Fi(Enter で飛ばして
 ホットスポット任せにできる)と Tailscale の auth key(任意)を聞かれる。
 それ以外は既定では何も焼き込まないので、他人に渡せるイメージになる。
+LAN や USB リンクで sshd が動くのは、作る人が `image.env` に SSH 鍵を書いた
+とき(開発用の個体)だけで、パスワードでの SSH ログインは常に無効。素の個体への
+保守は tailnet の ACL で制御される Tailscale SSH と設定ページで行う。
+
 自分の SSH 鍵や個体ごとのホットスポットパスワードは `deploy/image.env.example`
 を参照。
 
@@ -241,6 +257,15 @@ tailvision [--bind 0.0.0.0:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
 ```
 
 `RUST_LOG=debug` でログが増える。
+
+## Wi-Fi に関する注意
+
+- ホットスポットはわざと素の WPA2-PSK にしてある。NetworkManager 1.52 は AP に
+  PSK-SHA256 も喋らせるが、Zero W の Wi-Fi ファームウェアはビーコンを自前で
+  作り PSK しか載せないため、全クライアントがハンドシェイクを拒否する(スマホ
+  は「パスワードが違う」と言う)。tailvision は AP 起動直後に WPA-PSK だけに
+  固定し直す。
+- Zero W は 2.4GHz のみ。5GHz 専用のネットワークは見えない。
 
 ## 液晶を撮るときのコツ
 

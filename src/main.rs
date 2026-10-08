@@ -793,6 +793,9 @@ async fn main() -> anyhow::Result<()> {
         gadget: gadget.clone(),
         backend,
     };
+    if let Ok(h) = netmgr::hostname().await {
+        netmgr::write_local_dns(&h);
+    }
     if gadget.is_some() {
         tokio::spawn(netmgr::ensure_usb_ethernet());
     }
@@ -817,10 +820,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/debug.jpg", get(debug_jpg))
         .route("/setup/wifi", post(web::wifi))
         .route("/setup/forget", post(web::forget))
+        .route("/setup/go-online", post(web::go_online))
+        .route("/setup/cancel", post(web::cancel))
         .route("/setup/rescan", get(web::rescan))
         .route("/setup/hostname", post(web::hostname))
         .route("/setup/tailscale/key", post(web::tailscale_key))
         .route("/setup/tailscale/login", post(web::tailscale_login))
+        .route("/setup/tailscale/logout", post(web::tailscale_logout))
         .route("/setup/image", post(web::image_defaults))
         .route("/setup/camera/calibrate", post(web::camera_calibrate))
         .route("/setup/camera/unlock", post(web::camera_unlock))

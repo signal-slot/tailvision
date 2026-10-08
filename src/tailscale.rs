@@ -119,6 +119,23 @@ pub struct Login {
     inner: Mutex<LoginState>,
 }
 
+/// Leaves the tailnet: the node key is dropped and the machine disappears
+/// from the admin console, so the unit can be re-provisioned or handed on.
+pub async fn logout() -> Result<()> {
+    let out = Command::new("tailscale")
+        .args(["logout"])
+        .output()
+        .await
+        .context("run tailscale")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "tailscale logout failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct LoginState {
     auth_url: Option<String>,
@@ -145,6 +162,11 @@ impl Login {
 
     /// Starts `tailscale up --json` in the background and waits briefly for the
     /// login URL. Returns the URL if it arrived in time.
+    /// Forgets a login link from before a logout.
+    pub async fn reset(&self) {
+        *self.inner.lock().await = LoginState::default();
+    }
+
     pub async fn start(self: &Arc<Self>) -> Result<Option<String>> {
         {
             let mut s = self.inner.lock().await;

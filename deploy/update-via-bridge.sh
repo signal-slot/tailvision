@@ -45,6 +45,8 @@ sudo install -m 755 "$bin" "$mnt/usr/local/bin/tailvision"
 sudo install -m 644 "$root/deploy/tailvision.service" "$mnt/etc/systemd/system/tailvision.service"
 sudo install -m 644 "$root/deploy/tailscale-firstboot.service" "$mnt/etc/systemd/system/tailscale-firstboot.service"
 sudo install -m 644 "$root/deploy/dnsmasq-hotspot.conf" "$mnt/etc/NetworkManager/dnsmasq-shared.d/tailvision.conf"
+sudo install -m 644 "$root/deploy/modules-gadget.conf" "$mnt/etc/modules-load.d/tailvision-gadget.conf"
+sudo install -m 644 "$root/deploy/modprobe-gadget.conf" "$mnt/etc/modprobe.d/tailvision-gadget.conf"
 sync
 sudo umount "$mnt"
 echo "done: power the Pi on"

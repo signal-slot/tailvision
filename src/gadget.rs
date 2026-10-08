@@ -1,8 +1,12 @@
 //! USB gadget: the unit plugs into the device under test and shows up as a
 //! touch screen, a keyboard and a USB Ethernet adapter (configfs/libcomposite).
 //!
-//! Needs `dtoverlay=dwc2,dr_mode=peripheral` and the `dwc2` + `libcomposite`
-//! modules; without a UDC present everything here is a no-op.
+//! Needs `dtoverlay=dwc2,dr_mode=peripheral` and the `libcomposite` module.
+//! `dwc2` is deliberately kept from auto-loading (deploy/modprobe-gadget.conf)
+//! and loaded here instead, right before the gadget binds: a bound dwc2 with
+//! no gadget looks like a broken device to the host, which then retries and
+//! may power-cycle the port -- fatal when the unit is powered over that cable.
+//! Without a UDC present everything here is a no-op.
 
 use std::fs;
 use std::io::Write;
@@ -70,6 +74,31 @@ fn write(path: impl AsRef<Path>, value: impl AsRef<[u8]>) -> Result<()> {
         .with_context(|| format!("write {}", path.as_ref().display()))
 }
 
+/// Loads dwc2 (a no-op when already loaded or built in) and waits briefly
+/// for the UDC to appear.
+fn load_udc() -> Option<String> {
+    if let Some(u) = udc_name() {
+        return Some(u);
+    }
+    match std::process::Command::new("modprobe").arg("dwc2").output() {
+        Ok(o) if !o.status.success() => {
+            tracing::warn!(
+                "modprobe dwc2: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => tracing::warn!("modprobe dwc2: {e}"),
+        _ => {}
+    }
+    for _ in 0..30 {
+        if let Some(u) = udc_name() {
+            return Some(u);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
 /// First UDC the kernel offers, or None when the port is in host mode.
 fn udc_name() -> Option<String> {
     fs::read_dir("/sys/class/udc")
@@ -135,7 +164,7 @@ fn hidg_node(function_dir: &Path) -> Result<PathBuf> {
 impl Gadget {
     /// Builds and binds the gadget, or returns Ok(None) when there is no UDC.
     pub fn setup(product: &str, serial: &str) -> Result<Option<Gadget>> {
-        let Some(udc) = udc_name() else {
+        let Some(udc) = load_udc() else {
             return Ok(None);
         };
         let g = PathBuf::from(CONFIGFS).join(GADGET);

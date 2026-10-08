@@ -5,6 +5,8 @@ use anyhow::{Context, Result, anyhow};
 use tokio::process::Command;
 
 pub const HOTSPOT_CONNECTION: &str = "tailvision-hotspot";
+/// NetworkManager connection for the USB Ethernet gadget toward the device under test.
+pub const USB_CONNECTION: &str = "tailvision-usb";
 pub const HOTSPOT_ADDRESS: &str = "10.42.0.1";
 
 #[derive(Debug, Clone, Default)]
@@ -97,6 +99,9 @@ pub async fn any_online() -> Result<bool> {
             && f[1] != "loopback"
             && f[1] != "tun"
             && f[3] != HOTSPOT_CONNECTION
+            // The USB link toward the device under test is a shared
+            // (downstream) network, not a way out.
+            && f[3] != USB_CONNECTION
     }))
 }
 
@@ -214,6 +219,10 @@ pub async fn hotspot_up(iface: &str, ssid: &str, psk: &str) -> Result<()> {
         "disabled",
     ];
     if !psk.is_empty() {
+        // PMF must be off: wpa_supplicant defaults to "optional", which makes
+        // its AP code install a management-frame key (IGTK) that the Zero W's
+        // BCM43430 cannot do. The kernel then answers "key setting validation
+        // failed" and the AP never starts.
         args.extend([
             "wifi-sec.key-mgmt",
             "wpa-psk",
@@ -223,14 +232,146 @@ pub async fn hotspot_up(iface: &str, ssid: &str, psk: &str) -> Result<()> {
             "ccmp",
             "wifi-sec.group",
             "ccmp",
+            "wifi-sec.pmf",
+            "disable",
             "wifi-sec.psk",
             psk,
         ]);
     }
     nmcli(&args).await?;
-    nmcli(&["con", "up", "id", HOTSPOT_CONNECTION])
+    nmcli(&["con", "up", "id", HOTSPOT_CONNECTION]).await?;
+    if !psk.is_empty() {
+        pin_psk_only(iface).await;
+    }
+    Ok(())
+}
+
+/// Works around a mismatch that makes every client fail the WPA2 handshake
+/// on the Zero W ("wrong password" on phones, reason 17 in wpa_supplicant):
+/// NetworkManager 1.52 hands the AP `key_mgmt=WPA-PSK WPA-PSK-SHA256`, so
+/// the handshake's RSN element lists both AKMs, but the BCM43430 firmware
+/// builds the beacon's RSN element itself (the driver's attempt to install
+/// hostapd's element fails with -52) and lists plain PSK only. Clients
+/// compare the two and refuse. Restricting the running AP network to
+/// WPA-PSK and restarting it makes both sides agree; NetworkManager keeps
+/// the connection active across the restart. Done through wpa_supplicant's
+/// D-Bus API (the control socket is not reliably there for NM's interface).
+async fn pin_psk_only(iface: &str) {
+    const BUS: &str = "fi.w1.wpa_supplicant1";
+    let busctl = |args: Vec<String>| async move {
+        Command::new("busctl")
+            .args(&args)
+            .output()
+            .await
+            .map(|o| {
+                (
+                    o.status.success(),
+                    String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                    String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                )
+            })
+            .unwrap_or((false, String::new(), "busctl missing".into()))
+    };
+    // `o "/fi/w1/..."` -> /fi/w1/...
+    let path = |out: &str| out.split('"').nth(1).map(str::to_string);
+    let s = |x: &str| x.to_string();
+    let (_, out, err) = busctl(vec![
+        s("call"),
+        s(BUS),
+        s("/fi/w1/wpa_supplicant1"),
+        s(BUS),
+        s("GetInterface"),
+        s("s"),
+        s(iface),
+    ])
+    .await;
+    let Some(ifpath) = path(&out) else {
+        tracing::warn!(
+            err,
+            "hotspot: wpa_supplicant interface not found; cannot pin key_mgmt"
+        );
+        return;
+    };
+    // The AP network appears a moment after activation.
+    let mut net = None;
+    for _ in 0..20 {
+        let (_, out, _) = busctl(vec![
+            s("get-property"),
+            s(BUS),
+            ifpath.clone(),
+            format!("{BUS}.Interface"),
+            s("CurrentNetwork"),
+        ])
+        .await;
+        match path(&out) {
+            Some(p) if p != "/" => {
+                net = Some(p);
+                break;
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+    let Some(net) = net else {
+        tracing::warn!("hotspot: no current supplicant network; cannot pin key_mgmt");
+        return;
+    };
+    let netif = format!("{BUS}.Network");
+    let (ok1, _, e1) = busctl(vec![
+        s("set-property"),
+        s(BUS),
+        net.clone(),
+        netif.clone(),
+        s("Properties"),
+        s("a{sv}"),
+        s("1"),
+        s("key_mgmt"),
+        s("s"),
+        s("WPA-PSK"),
+    ])
+    .await;
+    let (ok2, _, e2) = busctl(vec![
+        s("set-property"),
+        s(BUS),
+        net.clone(),
+        netif.clone(),
+        s("Enabled"),
+        s("b"),
+        s("false"),
+    ])
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let (ok3, _, e3) = busctl(vec![
+        s("set-property"),
+        s(BUS),
+        net,
+        netif,
+        s("Enabled"),
+        s("b"),
+        s("true"),
+    ])
+    .await;
+    if ok1 && ok2 && ok3 {
+        tracing::info!("hotspot: key_mgmt pinned to WPA-PSK (brcmfmac beacon workaround)");
+    } else {
+        tracing::warn!(e1, e2, e3, "hotspot: pinning key_mgmt failed");
+    }
+}
+
+/// Activates a saved network profile (named after its SSID) on the client interface.
+pub async fn activate(ssid: &str) -> Result<()> {
+    nmcli(&["--wait", "45", "con", "up", "id", ssid])
         .await
         .map(|_| ())
+}
+
+/// Can we reach the Internet (DNS and a TCP connection to Tailscale's login server)?
+pub async fn internet_reachable() -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        tokio::net::TcpStream::connect(("login.tailscale.com", 443)),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
 }
 
 pub async fn hotspot_down() -> Result<()> {
@@ -271,31 +412,40 @@ pub async fn ensure_usb_ethernet() {
     let existing = nmcli(&["-t", "-f", "NAME", "con", "show"])
         .await
         .unwrap_or_default();
-    if existing.lines().any(|l| l == "tailvision-usb") {
-        return;
+    if !existing.lines().any(|l| l == USB_CONNECTION) {
+        match nmcli(&[
+            "con",
+            "add",
+            "type",
+            "ethernet",
+            "ifname",
+            "usb0",
+            "con-name",
+            USB_CONNECTION,
+            "connection.autoconnect",
+            "yes",
+            "ipv4.method",
+            "shared",
+            "ipv4.addresses",
+            "10.42.1.1/24",
+            "ipv6.method",
+            "disabled",
+        ])
+        .await
+        {
+            Ok(_) => tracing::info!("USB Ethernet gadget link configured (10.42.1.1/24)"),
+            Err(e) => {
+                tracing::warn!(error = %e, "USB Ethernet gadget link");
+                return;
+            }
+        }
     }
-    match nmcli(&[
-        "con",
-        "add",
-        "type",
-        "ethernet",
-        "ifname",
-        "usb0",
-        "con-name",
-        "tailvision-usb",
-        "connection.autoconnect",
-        "yes",
-        "ipv4.method",
-        "shared",
-        "ipv4.addresses",
-        "10.42.1.1/24",
-        "ipv6.method",
-        "disabled",
-    ])
-    .await
-    {
-        Ok(_) => tracing::info!("USB Ethernet gadget link configured (10.42.1.1/24)"),
-        Err(e) => tracing::warn!(error = %e, "USB Ethernet gadget link"),
+    // NetworkManager does not always autoconnect a connection added after the
+    // gadget interface appeared, so bring it up explicitly; a failure here
+    // (no host on the other end yet) is retried by autoconnect later.
+    match nmcli(&["--wait", "20", "con", "up", "id", USB_CONNECTION]).await {
+        Ok(_) => tracing::info!("USB Ethernet gadget link up"),
+        Err(e) => tracing::info!(error = %e, "USB Ethernet gadget link not up yet"),
     }
 }
 
@@ -305,6 +455,27 @@ pub async fn hostname() -> Result<String> {
         .await
         .context("run hostname")?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// dnsmasq options for the networks the unit shares (hotspot and USB link):
+/// `<hostname>.local` resolves to the unit's address on each of them, for
+/// clients without mDNS. Other names go to the real upstream DNS, so a device
+/// under test that reaches the Internet through the unit is not hijacked.
+pub const LOCAL_DNS_CONF: &str = "/etc/NetworkManager/dnsmasq-shared.d/tailvision.conf";
+
+pub fn write_local_dns(hostname: &str) {
+    let text = format!(
+        "# Written by tailvision on start and when the hostname changes.\n\
+         interface-name={hostname}.local,wlan0\n\
+         interface-name={hostname}.local,usb0\n"
+    );
+    match std::fs::read_to_string(LOCAL_DNS_CONF) {
+        Ok(cur) if cur == text => return,
+        _ => {}
+    }
+    if let Err(e) = std::fs::write(LOCAL_DNS_CONF, text) {
+        tracing::warn!(error = %e, path = LOCAL_DNS_CONF, "local DNS config");
+    }
 }
 
 pub async fn set_hostname(name: &str) -> Result<()> {
@@ -327,6 +498,7 @@ pub async fn set_hostname(name: &str) -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    write_local_dns(name);
     Ok(())
 }
 

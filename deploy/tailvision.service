@@ -15,7 +15,8 @@ Environment=RUST_LOG=info
 StateDirectory=tailvision
 ProtectSystem=strict
 # Status file and Wi-Fi country live on the boot partition.
-ReadWritePaths=/boot/firmware
+# /run/wpa_supplicant: wpa_cli must send to the control socket (hotspot key_mgmt pin).
+ReadWritePaths=/boot/firmware /etc/NetworkManager/dnsmasq-shared.d /run/wpa_supplicant
 ProtectHome=yes
 PrivateTmp=true
 NoNewPrivileges=true
