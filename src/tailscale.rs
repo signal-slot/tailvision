@@ -72,6 +72,34 @@ pub async fn status() -> Status {
     }
 }
 
+/// Whether `ip` is a tailnet peer according to tailscaled (`tailscale whois`),
+/// so a request from it was authenticated by Tailscale. Answers are cached
+/// for a minute: the setup page polls every few seconds.
+pub async fn is_peer(ip: std::net::IpAddr) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<HashMap<std::net::IpAddr, (Instant, bool)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((t, ok)) = cache.lock().unwrap().get(&ip).copied()
+        && t.elapsed() < Duration::from_secs(60)
+    {
+        return ok;
+    }
+    let ok = match Command::new("tailscale")
+        .args(["whois", "--json", &ip.to_string()])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => serde_json::from_slice::<serde_json::Value>(&o.stdout)
+            .map(|v| v.get("Node").is_some())
+            .unwrap_or(false),
+        _ => false,
+    };
+    cache.lock().unwrap().insert(ip, (Instant::now(), ok));
+    ok
+}
+
 /// Joins the tailnet non-interactively with an auth key.
 pub async fn up_with_key(key: &str) -> Result<()> {
     let out = Command::new("tailscale")

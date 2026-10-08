@@ -184,7 +184,11 @@ function render() {
   $('#camera-lock').innerHTML = s.camera.lock ? `Locked: <b>${esc(s.camera.lock)}</b>` : 'Automatic focus, exposure and white balance (slower, and the picture can change between shots).';
 
   if (s.key) {
-    $('#key').innerHTML = `<p>Current key: <code>${esc(s.key)}</code></p><p>Register in Claude Code (on the tailnet, or on the same Wi-Fi with the <code>.local</code> name):</p><pre>claude mcp add --transport http ${esc(s.hostname)} ${esc(s.urls.tailnet)}/mcp \\\n  --header "Authorization: Bearer ${esc(s.key)}"</pre><p class="muted">Browsers get this page with any user name and the key as password; <code>/screen.jpg?key=…</code> also works. On this Wi-Fi the unit is <a href="${esc(s.urls.local)}/">${esc(s.urls.local)}/</a>.</p>`;
+    const bearer = ` \\\n  --header "Authorization: Bearer ${esc(s.key)}"`;
+    let kh = `<p>Register in Claude Code. From the tailnet no key is needed:</p><pre>claude mcp add --transport http ${esc(s.hostname)} ${esc(s.urls.tailnet)}/mcp</pre>`;
+    kh += `<p>From the same Wi-Fi (no Tailscale) the agent sends the access key:</p><pre>claude mcp add --transport http ${esc(s.hostname)} ${esc(s.urls.local)}/mcp${bearer}</pre>`;
+    kh += `<p class="muted">The key is for agents, not for people: this page opens without it from the hotspot and from the tailnet, and nowhere else. <code>/screen.jpg?key=…</code> takes it too.</p>`;
+    $('#key').innerHTML = kh;
   } else {
     $('#key').innerHTML = '<p>No key yet; generate one.</p>';
   }

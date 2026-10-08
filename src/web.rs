@@ -1,4 +1,4 @@
-//! The setup page (`/`) and the access-key checks in front of everything.
+//! The setup page (`/`), its JSON API, and the access checks in front of everything.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -6,10 +6,9 @@ use std::net::{IpAddr, SocketAddr};
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use base64::Engine as _;
 
 use crate::App;
 use crate::config::{self, Config};
@@ -17,57 +16,69 @@ use crate::{netmgr, supervisor, tailscale};
 
 // ------------------------------------------------------------------ auth
 
-/// Gate: `/mcp` and `/shot.jpg` always need the bearer token (or `?key=` for
-/// the JPEG). The setup page needs Basic auth with the key as password, except
-/// for clients on the setup hotspot: whoever holds its WPA2 password is
-/// treated as having physical access, and that is how the key is first read.
-pub async fn require_key(State(app): State<App>, req: Request<Body>, next: Next) -> Response {
-    let key = app.config.read().await.mcp_key.clone().unwrap_or_default();
-    let path = req.uri().path();
-    let from_local_link = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| on_hotspot(ci.0.ip()))
-        .unwrap_or(false);
-    let auth = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let api = path.starts_with("/mcp") || path.ends_with(".jpg");
-    let ok = if api {
-        auth.strip_prefix("Bearer ").map(str::trim) == Some(key.as_str())
-            || (path == "/shot.jpg"
-                && query_param(req.uri().query(), "key").as_deref() == Some(key.as_str()))
-    } else {
-        from_local_link || basic_password(auth).as_deref() == Some(key.as_str())
-    };
-    if ok {
-        return next.run(req).await;
-    }
-    if api {
-        (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
-            "unauthorized: set Authorization: Bearer <key>\n",
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            [(
-                header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Basic realm=\"tailvision\", charset=\"UTF-8\""),
-            )],
-            "unauthorized: any user name, the access key as password\n",
-        )
-            .into_response()
-    }
+/// Who is asking, decided by the network path, not by a password.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Client {
+    /// On the setup hotspot: whoever holds its WPA2 password is standing next
+    /// to the unit.
+    Hotspot,
+    /// A tailnet peer: Tailscale has already authenticated it, and the
+    /// tailnet's ACL decides who gets here at all.
+    Tailnet,
+    /// Anything else (the LAN the unit joined, a port forward, ...): no
+    /// identity to go by.
+    Other,
 }
 
-/// Clients on the setup hotspot (10.42.0.0/24) may use the setup page without
-/// the key: whoever is on it has physical access to the unit. The Pi's own
-/// address (.1) is excluded so a request forwarded from elsewhere does not qualify.
+/// Gate. The setup page and its API are open to the hotspot and the tailnet
+/// and closed to everyone else. `/mcp` and the JPEGs are open to the hotspot
+/// and the tailnet too; from anywhere else they need the access key as a
+/// bearer token (or `?key=` for `/shot.jpg`), which is what an agent on the
+/// same Wi-Fi uses. Nobody ever types the key into a browser.
+pub async fn require_key(State(app): State<App>, req: Request<Body>, next: Next) -> Response {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let client = match peer {
+        Some(ip) => classify(ip).await,
+        None => Client::Other,
+    };
+    if client != Client::Other {
+        return next.run(req).await;
+    }
+    let path = req.uri().path();
+    let api = path.starts_with("/mcp") || path.ends_with(".jpg");
+    if api {
+        let key = app.config.read().await.mcp_key.clone().unwrap_or_default();
+        let auth = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let ok = !key.is_empty()
+            && (auth.strip_prefix("Bearer ").map(str::trim) == Some(key.as_str())
+                || (path == "/shot.jpg"
+                    && query_param(req.uri().query(), "key").as_deref() == Some(key.as_str())));
+        if ok {
+            return next.run(req).await;
+        }
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "unauthorized: set Authorization: Bearer <access key>\n",
+        )
+            .into_response();
+    }
+    (
+        StatusCode::FORBIDDEN,
+        "The setup page is reachable from the setup hotspot and from the tailnet only.\n",
+    )
+        .into_response()
+}
+
+/// Clients on the setup hotspot (10.42.0.0/24). The Pi's own address (.1)
+/// is excluded so a request forwarded from elsewhere does not qualify.
 fn on_hotspot(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -78,11 +89,28 @@ fn on_hotspot(ip: IpAddr) -> bool {
     }
 }
 
-fn basic_password(auth: &str) -> Option<String> {
-    let b64 = auth.strip_prefix("Basic ")?.trim();
-    let decoded = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    let s = String::from_utf8(decoded).ok()?;
-    s.split_once(':').map(|(_, p)| p.to_string())
+/// Tailscale's address ranges: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
+fn in_tailnet_range(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (64..128).contains(&o[1])
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => in_tailnet_range(v4.into()),
+            None => v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+        },
+    }
+}
+
+async fn classify(ip: IpAddr) -> Client {
+    if on_hotspot(ip) {
+        return Client::Hotspot;
+    }
+    if in_tailnet_range(ip) && tailscale::is_peer(ip).await {
+        return Client::Tailnet;
+    }
+    Client::Other
 }
 
 fn query_param(query: Option<&str>, name: &str) -> Option<String> {
@@ -104,6 +132,8 @@ pub async fn index() -> Html<&'static str> {
 #[derive(serde::Serialize)]
 pub struct StateJson {
     hostname: String,
+    /// "hotspot", "tailnet" or "other": which path this request came in on.
+    client: &'static str,
     wifi: WifiJson,
     scan: Vec<ApJson>,
     saved: Vec<String>,
@@ -169,7 +199,15 @@ struct UrlsJson {
     tailnet: String,
 }
 
-pub async fn api_state(State(app): State<App>) -> Json<StateJson> {
+pub async fn api_state(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Json<StateJson> {
+    let client = match classify(peer.ip()).await {
+        Client::Hotspot => "hotspot",
+        Client::Tailnet => "tailnet",
+        Client::Other => "other",
+    };
     let hostname = netmgr::hostname().await.unwrap_or_default();
     let wifi = netmgr::wifi_status(&app.cli.wifi_iface)
         .await
@@ -249,6 +287,7 @@ pub async fn api_state(State(app): State<App>) -> Json<StateJson> {
         gadget: app.gadget.is_some(),
         key: cfg.mcp_key,
         hostname,
+        client,
     })
 }
 
@@ -486,18 +525,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn basic_auth_parsing() {
-        let b64 = base64::engine::general_purpose::STANDARD.encode("anyone:s3cret");
-        assert_eq!(
-            basic_password(&format!("Basic {b64}")).as_deref(),
-            Some("s3cret")
-        );
-        assert_eq!(basic_password("Bearer x"), None);
+    fn key_query_and_ranges() {
         assert_eq!(
             query_param(Some("w=1&key=abc"), "key").as_deref(),
             Some("abc")
         );
         assert_eq!(query_param(None, "key"), None);
+        assert!(in_tailnet_range("100.127.198.31".parse().unwrap()));
+        assert!(in_tailnet_range("::ffff:100.64.0.1".parse().unwrap()));
+        assert!(!in_tailnet_range("100.128.0.1".parse().unwrap()));
+        assert!(in_tailnet_range(
+            "fd7a:115c:a1e0::8c37:c621".parse().unwrap()
+        ));
+        assert!(!in_tailnet_range("192.168.1.56".parse().unwrap()));
     }
 
     #[test]

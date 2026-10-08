@@ -28,7 +28,8 @@ phone / PC ──(Wi-Fi or setup hotspot)──▶ setup page http://tailvision-
 - One static Rust binary. No Python, no OpenCV, no C libraries.
 - MCP over Streamable HTTP at `/mcp`, with a bearer token that exists from the
   first boot. The camera is never open to the network.
-- A setup page at `/` for Wi-Fi, hostname, Tailscale and the access key.
+- A setup page at `/` for Wi-Fi, hostname and Tailscale, open from the
+  hotspot and from the tailnet without any password.
   When the unit cannot find a network it raises its own WPA2 hotspot so the
   page can be reached from a phone.
 - Tailscale built in, so the unit is reachable by name from anywhere.
@@ -154,12 +155,19 @@ Port 80.
 
 ### Who can do what
 
-- `/mcp` and the `.jpg` endpoints always require `Authorization: Bearer <key>`
-  (`?key=` also works for the images). A key is generated on the very first start.
-- The setup page requires HTTP Basic auth (any user name, the key as password),
-  except for clients connected through the setup hotspot: whoever has the
-  hotspot's WPA2 password is treated as standing next to the unit, and that is
-  how the key is read the first time.
+Access is decided by the path a request comes in on, never by a password a
+person types.
+
+- From the setup hotspot everything is open: whoever has the hotspot's WPA2
+  password is standing next to the unit.
+- From the tailnet everything is open too: Tailscale has authenticated the
+  peer (`tailscale whois`), and the tailnet's ACL decides who reaches the unit
+  at all. `claude mcp add` needs no header there.
+- From anywhere else (the Wi-Fi the unit joined, for instance) the setup page
+  is refused, and `/mcp` and the `.jpg` endpoints need
+  `Authorization: Bearer <key>` (`?key=` also works for the images). The key
+  exists from the first start and is shown on the setup page for copying into
+  an agent's configuration; it is for agents, not for people.
 - Units can ship with their own hotspot password: write it to
   `hotspot-password` on the boot (FAT) partition and print it on the label.
 
