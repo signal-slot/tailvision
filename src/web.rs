@@ -337,30 +337,6 @@ pub async fn index(
         );
     }
 
-    // ---- image defaults
-    {
-        let cfg = app.config.read().await.clone();
-        let sel = |deg: i32| {
-            if cfg.rotation_degrees.rem_euclid(360) == deg {
-                " selected"
-            } else {
-                ""
-            }
-        };
-        h.push_str(&format!(
-            "<h2>Image</h2><form method=post action='/setup/image'><label>Rotate the screenshot <select name=rotation>\
-             <option value=0{}>0°</option><option value=90{}>90°</option><option value=180{}>180°</option><option value=270{}>270°</option></select></label> \
-             <label><input type=checkbox name=flip_h{}> mirror horizontally</label> <label><input type=checkbox name=flip_v{}> mirror vertically</label> \
-             <button>Save</button><p class=muted>Applied when a tool call does not specify rotation or flips. Use it when the camera hangs sideways or upside down.</p></form>",
-            sel(0),
-            sel(90),
-            sel(180),
-            sel(270),
-            if cfg.flip_horizontal { " checked" } else { "" },
-            if cfg.flip_vertical { " checked" } else { "" }
-        ));
-    }
-
     h.push_str("<h2>Access key</h2>");
     match &key {
         Some(k) => {
@@ -508,32 +484,6 @@ async fn save_key(app: &App, key: Option<String>) -> Result<(), String> {
     app.store.save(&cfg).map_err(|e| format!("{e:#}"))?;
     *app.config.write().await = cfg;
     Ok(())
-}
-
-#[derive(serde::Deserialize)]
-pub struct ImageForm {
-    #[serde(default)]
-    rotation: i32,
-    flip_h: Option<String>,
-    flip_v: Option<String>,
-}
-
-pub async fn image_defaults(State(app): State<App>, Form(f): Form<ImageForm>) -> Redirect {
-    let rotation = f.rotation.rem_euclid(360);
-    if rotation % 90 != 0 {
-        return back("rotation must be 0, 90, 180 or 270");
-    }
-    let cfg = Config {
-        rotation_degrees: rotation,
-        flip_horizontal: f.flip_h.is_some(),
-        flip_vertical: f.flip_v.is_some(),
-        ..app.config.read().await.clone()
-    };
-    if let Err(e) = app.store.save(&cfg) {
-        return back(&format!("{e:#}"));
-    }
-    *app.config.write().await = cfg;
-    back("image defaults saved")
 }
 
 pub async fn camera_calibrate(State(app): State<App>) -> Redirect {

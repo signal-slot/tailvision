@@ -194,11 +194,7 @@ impl Camera {
             .context("capture task")?
     }
 
-    fn screen_request(
-        &self,
-        p: &ShotParams,
-        defaults: &config::Config,
-    ) -> anyhow::Result<pipeline::ScreenRequest> {
+    fn screen_request(&self, p: &ShotParams) -> anyhow::Result<pipeline::ScreenRequest> {
         let manual_corners = match &p.manual_corners {
             None => None,
             Some(v) if v.len() == 4 => Some([
@@ -216,9 +212,9 @@ impl Camera {
                 output_width: p.output_width,
                 output_height: p.output_height,
                 margin_ratio: p.margin_ratio.unwrap_or(0.0).clamp(-0.5, 0.5),
-                rotation_degrees: p.rotation_degrees.unwrap_or(defaults.rotation_degrees),
-                flip_horizontal: p.flip_horizontal.unwrap_or(defaults.flip_horizontal),
-                flip_vertical: p.flip_vertical.unwrap_or(defaults.flip_vertical),
+                rotation_degrees: p.rotation_degrees.unwrap_or(0),
+                flip_horizontal: p.flip_horizontal.unwrap_or(false),
+                flip_vertical: p.flip_vertical.unwrap_or(false),
             },
             manual_corners,
             reuse_detection: p.reuse_detection.unwrap_or(false),
@@ -309,9 +305,11 @@ struct ShotParams {
     output_height: Option<u32>,
     /// Shrink (positive) or grow (negative) the detected quad toward its centre, as a fraction (-0.5..0.5).
     margin_ratio: Option<f32>,
-    /// Rotate the result by 0, 90, 180 or 270 degrees.
+    /// Rotate the result by 0, 90, 180 or 270 degrees (default 0: the image comes out the way the camera sees it).
     rotation_degrees: Option<i32>,
+    /// Mirror the result left-right (default false).
     flip_horizontal: Option<bool>,
+    /// Mirror the result top-bottom (default false).
     flip_vertical: Option<bool>,
     /// Smallest candidate area as a fraction of the frame (default 0.05).
     min_area_ratio: Option<f32>,
@@ -523,7 +521,7 @@ impl TailvisionServer {
 
     #[tool(
         name = "take_screenshot",
-        description = "Photograph the LCD the webcam is pointed at and return just the screen, perspective-corrected, as a JPEG. The screen is auto-detected each time unless reuse_detection or manual_corners is given; pass raw=true for the whole camera frame.",
+        description = "Photograph the LCD the webcam is pointed at and return just the screen, perspective-corrected, as a JPEG. The screen is auto-detected each time unless reuse_detection or manual_corners is given; pass raw=true for the whole camera frame. The image comes out the way the camera sees it: the camera may be held at any angle and may move between calls, and the unit never guesses which way is up. If the text reads sideways or upside down, call again with rotation_degrees (90, 180 or 270); tap and swipe coordinates always refer to the image you received, whichever rotation it had.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     async fn take_screenshot(
@@ -545,11 +543,7 @@ impl TailvisionServer {
             );
             return Ok(image_result(&shot.jpeg, note));
         }
-        let defaults = self.camera.config.read().await.clone();
-        let req = self
-            .camera
-            .screen_request(&p, &defaults)
-            .map_err(tool_error)?;
+        let req = self.camera.screen_request(&p).map_err(tool_error)?;
         let shot = self.camera.screen(req, false).await.map_err(tool_error)?;
         Ok(image_result(&shot.jpeg, pipeline::describe(&shot)))
     }
@@ -563,11 +557,7 @@ impl TailvisionServer {
         &self,
         Parameters(p): Parameters<ShotParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let defaults = self.camera.config.read().await.clone();
-        let req = self
-            .camera
-            .screen_request(&p, &defaults)
-            .map_err(tool_error)?;
+        let req = self.camera.screen_request(&p).map_err(tool_error)?;
         let shot = self.camera.screen(req, true).await.map_err(tool_error)?;
         Ok(image_result(&shot.jpeg, pipeline::describe(&shot)))
     }
@@ -700,8 +690,7 @@ async fn params_from_query(
         reuse_detection: Some(q.get("reuse").is_some_and(|v| v == "1")),
         ..Default::default()
     };
-    let defaults = app.config.read().await.clone();
-    app.camera.screen_request(&p, &defaults)
+    app.camera.screen_request(&p)
 }
 
 #[tokio::main]
@@ -827,7 +816,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/setup/tailscale/key", post(web::tailscale_key))
         .route("/setup/tailscale/login", post(web::tailscale_login))
         .route("/setup/tailscale/logout", post(web::tailscale_logout))
-        .route("/setup/image", post(web::image_defaults))
         .route("/setup/camera/calibrate", post(web::camera_calibrate))
         .route("/setup/camera/unlock", post(web::camera_unlock))
         .route("/setup/key/generate", post(web::key_generate))

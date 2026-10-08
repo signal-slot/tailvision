@@ -55,6 +55,13 @@ fixed). Parameters: `raw=true` returns the whole camera frame;
 `flip_vertical`, `min_area_ratio`; and the capture controls `width`/`height`,
 `skip_frames`, `quality`.
 
+The image comes out the way the camera sees it. The camera may be held at any
+angle and may move between calls, and the unit never guesses which way is up:
+there is no stored orientation. The agent looks at the picture and, if the
+text reads sideways or upside down, calls again with `rotation_degrees`. Tap
+and swipe coordinates always refer to the image the agent received, whichever
+rotation it had, so that stays consistent.
+
 Detection looks for the LCD-likeliest convex quadrilateral: candidates from
 straight edges, bright/dark masks and the extent of bright UI content, scored
 by aspect ratio, size, how much of the content they contain and whether a real
@@ -133,9 +140,6 @@ Port 80.
    - **Tailscale, log out**: shown once the unit is logged in. Removes the
      unit from the tailnet so it can be re-provisioned or handed on; after
      that it is reachable only on the hotspot or the USB link.
-   - **Image**: default rotation (0/90/180/270) and mirroring of the returned
-     screenshot, for a camera mounted sideways or upside down. Tool calls that
-     pass their own `rotation_degrees`/flips override it.
    - **Access key**: shown on the page together with the exact `claude mcp add`
      command. "Generate a new key" rotates it.
 5. Carried out of Wi-Fi range, the unit raises the hotspot again after 90

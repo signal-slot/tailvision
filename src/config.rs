@@ -9,14 +9,6 @@ pub struct Config {
     /// Bearer token for /mcp and /shot.jpg, and Basic-auth password for the setup page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_key: Option<String>,
-    /// Default orientation of the rectified screen (0/90/180/270), for a camera
-    /// that is mounted sideways or upside down. Tool parameters override it.
-    #[serde(default)]
-    pub rotation_degrees: i32,
-    #[serde(default)]
-    pub flip_horizontal: bool,
-    #[serde(default)]
-    pub flip_vertical: bool,
     /// Fixed focus / exposure / white balance for the CSI camera, from the
     /// setup page's "Calibrate" or the calibrate_camera tool. None = automatic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
