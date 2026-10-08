@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tailvision</title>
+<style>
+:root{--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--bg:#fff;--card:#f6f8fa;--ok:#dafbe1;--okline:#4ac26b;--err:#ffebe9;--errline:#ff8182;--accent:#0969da}
+@media(prefers-color-scheme:dark){:root{--fg:#e6edf3;--muted:#8d96a0;--line:#30363d;--bg:#0d1117;--card:#161b22;--ok:#12261e;--okline:#238636;--err:#3a1618;--errline:#da3633;--accent:#58a6ff}}
+body{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:0 auto;padding:1rem;color:var(--fg);background:var(--bg)}
+h1{font-size:1.4rem;margin:.2rem 0 .6rem}h1 small{font-weight:normal;color:var(--muted)}
+h2{font-size:1.1rem;border-bottom:1px solid var(--line);padding-bottom:.2rem;margin:1.6rem 0 .6rem}
+label{display:block;margin:.4rem 0}input,select,button{font:inherit;padding:.4rem .6rem;margin:.1rem 0;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px}
+input[type=text],input[type=password],select{width:100%;box-sizing:border-box}
+button{cursor:pointer}button.primary{background:var(--accent);color:#fff;border-color:transparent}button:disabled{opacity:.5;cursor:default}
+code,pre{background:var(--card);padding:.1rem .3rem;border-radius:4px;word-break:break-all}pre{padding:.6rem;overflow-x:auto;white-space:pre-wrap}
+.box{padding:.6rem .8rem;border-radius:6px;margin:.5rem 0;border:1px solid var(--line);background:var(--card)}
+.ok{background:var(--ok);border-color:var(--okline)}.err{background:var(--err);border-color:var(--errline)}
+.row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}.muted{color:var(--muted)}
+ul{padding-left:1.2rem}li{margin:.15rem 0}a{color:var(--accent)}
+#conn{position:sticky;top:0;z-index:1}
+#toast{position:fixed;left:50%;bottom:1rem;transform:translateX(-50%);max-width:90vw;padding:.5rem .9rem;border-radius:6px;background:var(--fg);color:var(--bg);opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:.95}
+</style>
+</head>
+<body>
+<h1>tailvision <small id="hostname"></small></h1>
+<div id="conn" class="box err" hidden></div>
+<div id="neterr" class="box err" hidden></div>
+<div id="prov" hidden></div>
+
+<h2>Status</h2>
+<ul>
+<li>Wi-Fi: <b id="st-wifi">…</b></li>
+<li>Tailscale: <b id="st-ts">…</b> <span id="st-ts-extra" class="muted"></span></li>
+<li>Camera: <b id="st-camera">…</b></li>
+<li>USB to the device under test: <b id="st-gadget">…</b></li>
+<li>Access key: <b id="st-key">…</b></li>
+<li id="st-links"></li>
+</ul>
+
+<h2>Wi-Fi</h2>
+<form id="f-wifi">
+<label>Network<br><select id="ssid" name="ssid"><option value="">-- type the name below --</option></select></label>
+<label>Name (if not listed)<br><input type="text" id="ssid_manual" autocomplete="off"></label>
+<label>Password<br><input type="password" id="psk" autocomplete="off"></label>
+<div class="row"><button class="primary" type="submit">Join</button> <button type="button" id="rescan">Rescan</button> <span id="scan-note" class="muted"></span></div>
+</form>
+<div id="saved"></div>
+<p class="muted" id="wifi-note"></p>
+
+<h2>Hostname</h2>
+<form id="f-host" class="row"><input type="text" id="hostname-in" pattern="[A-Za-z0-9-]+" style="width:auto;flex:1"> <button type="submit">Rename</button></form>
+<p class="muted">Used for <code>.local</code>, the Tailscale name and the hotspot name (<code>&lt;hostname&gt;-setup</code>).</p>
+
+<h2>Tailscale</h2>
+<div id="ts"></div>
+<form id="f-ts-login" class="row"><button type="submit">Get a login link</button> <span class="muted">needs Internet access</span></form>
+<form id="f-ts-key"><label>or an auth key<br><input type="password" id="authkey" placeholder="tskey-auth-…" autocomplete="off"></label> <button type="submit">Join with key</button></form>
+
+<div id="camera-sec" hidden>
+<h2>Camera</h2>
+<p id="camera-lock"></p>
+<div class="row"><button id="cal">Calibrate and lock</button> <button id="uncal">Back to automatic</button></div>
+<p class="muted">Point the camera at the lit screen first. Calibration takes a few seconds; afterwards every screenshot uses the same focus, exposure and white balance.</p>
+</div>
+
+<h2>Access key</h2>
+<div id="key"></div>
+<div class="row"><button id="keygen">Generate a new key</button> <span class="muted">the old one stops working immediately</span></div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let state = null, lost = 0, pending = new Set();
+
+function toast(msg, isErr) {
+  const t = $('#toast'); t.textContent = msg; t.className = 'show'; t.style.background = isErr ? 'var(--errline)' : '';
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.className = '', 4000);
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/state', {cache: 'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    state = await r.json(); lost = 0; render();
+  } catch (e) {
+    lost++;
+    if (lost >= 2) {
+      $('#conn').hidden = false;
+      $('#conn').textContent = 'No connection to the unit. If you just pressed Join, the hotspot is away for about a minute; reconnect when it is back, this page catches up by itself.';
+    }
+  }
+}
+
+async function act(path, body, btn) {
+  if (btn) { btn.disabled = true; pending.add(btn); }
+  try {
+    const r = await fetch(path, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body || {})});
+    const j = await r.json().catch(() => ({message: 'HTTP ' + r.status}));
+    toast(j.message || (r.ok ? 'done' : 'failed'), !r.ok);
+    return r.ok;
+  } catch (e) {
+    toast('request failed: ' + e.message, true); return false;
+  } finally {
+    if (btn) { btn.disabled = false; pending.delete(btn); }
+    refresh();
+  }
+}
+
+function setOptions(sel, items) {
+  const cur = sel.value;
+  const want = ['<option value="">-- type the name below --</option>'].concat(items.map(a =>
+    `<option value="${esc(a.ssid)}">${esc(a.ssid)} (${a.signal}%${a.open ? ', open' : ''})</option>`)).join('');
+  if (sel.dataset.html !== want) { sel.innerHTML = want; sel.dataset.html = want; sel.value = cur; }
+}
+
+function render() {
+  const s = state;
+  $('#conn').hidden = true;
+  $('#hostname').textContent = 'on ' + s.hostname;
+  document.title = 'tailvision on ' + s.hostname;
+
+  const ne = $('#neterr'); ne.hidden = !s.net_error; ne.textContent = s.net_error ? 'Network: ' + s.net_error : '';
+
+  // Result of the last Join (round trip), awaiting Go online.
+  const p = s.provisioning, pv = $('#prov');
+  if (!p) { pv.hidden = true; pv.innerHTML = ''; }
+  else {
+    pv.hidden = false;
+    if (p.error) {
+      pv.innerHTML = `<div class="box err"><b>Join failed.</b> ${esc(p.error)} Check the password and try again below.</div>`;
+    } else if (p.tailscale_running) {
+      pv.innerHTML = `<div class="box ok"><b>Wi-Fi "${esc(p.ssid)}" works</b>${p.ip ? ' (' + esc(p.ip) + ')' : ''} and the unit is already on Tailscale, so it stays on that network.</div>`;
+    } else {
+      let h = `<div class="box ok"><p><b>Wi-Fi "${esc(p.ssid)}" works</b>${p.ip ? ' (' + esc(p.ip) + ')' : ''}. Internet access: <b>${p.internet ? 'yes' : 'no'}</b>.</p>`;
+      if (p.auth_url) h += `<p>1. Approve the unit by opening this link on a device that is on the Internet. A phone on this hotspot has no Internet, so use another device, or copy the link and open it after leaving the hotspot:<br><a href="${esc(p.auth_url)}" target="_blank" rel="noopener">${esc(p.auth_url)}</a></p>`;
+      if (s.key) h += `<p>2. Note the access key; you need it to register the unit in Claude Code: <code>${esc(s.key)}</code></p>`;
+      if (p.note) h += `<p class="err box">${esc(p.note)}</p>`;
+      h += `<p>3. <button class="primary" id="go-online">Go online</button> The hotspot goes away; the LED turns solid once the unit is on Tailscale. If something is missing, the hotspot returns within two minutes with a note here. <button id="cancel">Cancel</button></p></div>`;
+      pv.innerHTML = h;
+      $('#go-online').onclick = e => act('/api/go-online', {}, e.target);
+      $('#cancel').onclick = e => act('/api/cancel', {}, e.target);
+    }
+  }
+
+  const w = s.wifi;
+  $('#st-wifi').textContent = w.hotspot ? 'setup hotspot (not connected to any network)' : `${w.state}${w.ssid ? ' to ' + w.ssid : ''}${w.ip ? ', ' + w.ip : ''}`;
+  const t = s.tailscale;
+  $('#st-ts').textContent = t.state + (t.dns_name ? ' as ' + t.dns_name : '');
+  $('#st-ts-extra').textContent = t.error ? '(' + t.error + ')' : '';
+  $('#st-camera').textContent = s.camera.backend;
+  $('#st-gadget').textContent = s.gadget ? 'gadget active (touch, keyboard)' : 'off (port in host mode or no cable)';
+  $('#st-key').textContent = s.key ? 'set' : 'not set';
+  const q = s.key ? '?key=' + encodeURIComponent(s.key) : '';
+  $('#st-links').innerHTML = `Camera: <a href="/screen.jpg${q}" target="_blank">screen</a> · <a href="/debug.jpg${q}" target="_blank">detection</a> · <a href="/shot.jpg${q}" target="_blank">raw frame</a>`;
+
+  setOptions($('#ssid'), s.scan);
+  $('#scan-note').textContent = s.scan.length ? '' : 'no scan results yet';
+  $('#saved').innerHTML = s.saved.length ? '<p>Saved networks:</p><ul>' + s.saved.map(n =>
+    `<li class="row">${esc(n)} <button data-forget="${esc(n)}">forget</button></li>`).join('') + '</ul>' : '';
+  document.querySelectorAll('[data-forget]').forEach(b => b.onclick = e => act('/api/wifi/forget', {ssid: b.dataset.forget}, e.target));
+  $('#wifi-note').textContent = 'Join takes the hotspot down for about a minute: the unit joins the network, checks Internet access and fetches a Tailscale login link, then this hotspot comes back and the result appears at the top of this page. A unit that is already on Tailscale just stays on the new network.';
+
+  const hi = $('#hostname-in');
+  if (document.activeElement !== hi && hi.dataset.seen !== s.hostname) { hi.value = s.hostname; hi.dataset.seen = s.hostname; }
+
+  let th = '';
+  if (t.running) th += `<p>Logged in as <b>${esc(t.dns_name || '?')}</b> (${esc(t.ips.join(', '))}).</p><p class="row"><button id="ts-logout">Log out</button> <span class="muted">removes this unit from the tailnet</span></p>`;
+  if (t.auth_url) th += `<div class="box ok">Approve the node by opening this link on a device that is on the Internet (not a phone on this hotspot):<br><a href="${esc(t.auth_url)}" target="_blank" rel="noopener">${esc(t.auth_url)}</a></div>`;
+  else if (t.login_running) th += `<div class="box">Waiting for Tailscale to produce a login link…</div>`;
+  if (t.login_error) th += `<div class="box err">Login failed: ${esc(t.login_error)}</div>`;
+  $('#ts').innerHTML = th;
+  const lo = $('#ts-logout');
+  if (lo) lo.onclick = e => {
+    if (lo.dataset.armed) { act('/api/tailscale/logout', {}, lo); delete lo.dataset.armed; lo.textContent = 'Log out'; }
+    else { lo.dataset.armed = '1'; lo.textContent = 'Leave the tailnet? Click again to confirm'; setTimeout(() => { delete lo.dataset.armed; lo.textContent = 'Log out'; }, 5000); }
+  };
+
+  $('#camera-sec').hidden = !s.camera.csi;
+  $('#camera-lock').innerHTML = s.camera.lock ? `Locked: <b>${esc(s.camera.lock)}</b>` : 'Automatic focus, exposure and white balance (slower, and the picture can change between shots).';
+
+  if (s.key) {
+    $('#key').innerHTML = `<p>Current key: <code>${esc(s.key)}</code></p><p>Register in Claude Code (on the tailnet, or on the same Wi-Fi with the <code>.local</code> name):</p><pre>claude mcp add --transport http ${esc(s.hostname)} ${esc(s.urls.tailnet)}/mcp \\\n  --header "Authorization: Bearer ${esc(s.key)}"</pre><p class="muted">Browsers get this page with any user name and the key as password; <code>/screen.jpg?key=…</code> also works. On this Wi-Fi the unit is <a href="${esc(s.urls.local)}/">${esc(s.urls.local)}/</a>.</p>`;
+  } else {
+    $('#key').innerHTML = '<p>No key yet; generate one.</p>';
+  }
+}
+
+$('#f-wifi').onsubmit = e => {
+  e.preventDefault();
+  const ssid = $('#ssid_manual').value.trim() || $('#ssid').value;
+  if (!ssid) return toast('pick a network or type its name', true);
+  act('/api/wifi/join', {ssid, psk: $('#psk').value}, e.submitter);
+};
+$('#rescan').onclick = e => act('/api/wifi/rescan', {}, e.target);
+$('#f-host').onsubmit = e => { e.preventDefault(); act('/api/hostname', {hostname: $('#hostname-in').value.trim()}, e.submitter); };
+$('#f-ts-login').onsubmit = e => { e.preventDefault(); act('/api/tailscale/login', {}, e.submitter); };
+$('#f-ts-key').onsubmit = e => { e.preventDefault(); act('/api/tailscale/key', {authkey: $('#authkey').value.trim()}, e.submitter).then(ok => { if (ok) $('#authkey').value = ''; }); };
+$('#cal').onclick = e => act('/api/camera/calibrate', {}, e.target);
+$('#uncal').onclick = e => act('/api/camera/unlock', {}, e.target);
+$('#keygen').onclick = e => {
+  if (e.target.dataset.armed) { act('/api/key/generate', {}, e.target); delete e.target.dataset.armed; e.target.textContent = 'Generate a new key'; }
+  else { e.target.dataset.armed = '1'; e.target.textContent = 'Click again to replace the key'; setTimeout(() => { delete e.target.dataset.armed; e.target.textContent = 'Generate a new key'; }, 5000); }
+};
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
