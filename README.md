@@ -294,7 +294,7 @@ delta flash moves hundreds of megabytes).
 ## Options
 
 ```
-tailvision [--bind 0.0.0.0:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
+tailvision [--bind [::]:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
            [--csi-args "--hflip"] [--no-gadget] [--device /dev/video0]
            [--width W --height H] [--skip-frames 10] [--quality 85]
            [--frame-timeout 5] [--state-dir /var/lib/tailvision]
