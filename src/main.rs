@@ -55,7 +55,7 @@ pub const DEFAULT_HOTSPOT_PASSWORD: &str = "tailvision-setup";
 )]
 pub struct Cli {
     /// Address to listen on.
-    #[arg(long, default_value = "0.0.0.0:80")]
+    #[arg(long, default_value = "[::]:80")]
     bind: String,
     /// V4L2 device node.
     #[arg(long, default_value = "/dev/video0")]
