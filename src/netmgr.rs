@@ -458,17 +458,28 @@ pub async fn hostname() -> Result<String> {
 }
 
 /// dnsmasq options for the networks the unit shares (hotspot and USB link):
-/// `<hostname>.local` resolves to the unit's address on each of them, for
-/// clients without mDNS. Other names go to the real upstream DNS, so a device
-/// under test that reaches the Internet through the unit is not hijacked.
+/// `<hostname>.local` and the OS connectivity-probe names
+/// (`web::CAPTIVE_PROBE_HOSTS`) resolve to the unit's address on the link the
+/// query came in on, so the probes reach the setup page and a phone that
+/// joins the hotspot opens its "sign in to network" window there. Every other
+/// name goes to the real upstream DNS, so a device under test that reaches
+/// the Internet through the unit is not hijacked.
 pub const LOCAL_DNS_CONF: &str = "/etc/NetworkManager/dnsmasq-shared.d/tailvision.conf";
 
 pub fn write_local_dns(hostname: &str) {
-    let text = format!(
+    let mut text = String::from(
         "# Written by tailvision on start and when the hostname changes.\n\
-         interface-name={hostname}.local,wlan0\n\
-         interface-name={hostname}.local,usb0\n"
+         # Each name resolves to the unit's address on the link the query arrived on.\n\
+         localise-queries\n",
     );
+    let probes = crate::web::CAPTIVE_PROBE_HOSTS
+        .iter()
+        .map(|h| h.to_string());
+    for name in std::iter::once(format!("{hostname}.local")).chain(probes) {
+        for iface in ["wlan0", "usb0"] {
+            text.push_str(&format!("interface-name={name},{iface}\n"));
+        }
+    }
     match std::fs::read_to_string(LOCAL_DNS_CONF) {
         Ok(cur) if cur == text => return,
         _ => {}

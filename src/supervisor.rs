@@ -45,6 +45,9 @@ pub struct NetState {
     pub last_error: Mutex<Option<String>>,
     /// Set while a connect/hotspot transition is in flight so the loop keeps its hands off.
     pub switching: AtomicBool,
+    /// Last `any_online` result, for answering the connectivity probes of a
+    /// device on the USB link (see `web::fallback`).
+    pub online: AtomicBool,
 }
 
 impl NetState {
@@ -354,6 +357,7 @@ pub async fn run(app: App) {
         };
         let hotspot_up = wifi.is_hotspot();
         let online = netmgr::any_online().await.unwrap_or(false);
+        app.net.online.store(online, Ordering::Relaxed);
         let ts = tailscale::status().await;
         write_status(&app, &mut last_status, &wifi, online, &ts).await;
         if let Some(l) = led.as_mut() {

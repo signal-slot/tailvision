@@ -84,7 +84,7 @@ inserted, YUYV encoded on the Pi, the first `skip_frames` frames dropped).
 | `/debug.jpg`  | Raw frame with the detected outline drawn on                   |
 | `/shot.jpg`  | Raw frame, `?w=1280&h=720&skip=10&q=85`, for curl and browsers |
 | `/mcp`       | MCP (Streamable HTTP)                                          |
-| anything else | redirects to `/`                                               |
+| anything else | redirects to `/`. On the hotspot and the USB link the OS connectivity probes land here too, so joining the hotspot pops up the "sign in to network" window on the setup page |
 
 Port 80.
 
@@ -100,7 +100,9 @@ Port 80.
    **`tailvision-xxxx-setup`** (WPA2, password **`tailvision-setup`** unless
    the unit shipped with its own, see below). The LED blinks fast while the
    hotspot is up.
-3. Join it from a phone or laptop and open `http://tailvision-xxxx.local/`
+3. Join it from a phone or laptop. The "sign in to network" window that
+   phones and laptops show for a network without Internet access opens the
+   setup page; if it does not appear, open `http://tailvision-xxxx.local/`
    (or `http://10.42.0.1/`). The same page is reachable over the USB cable from
    the machine the unit is plugged into, at `http://tailvision-xxxx.local/` or
    `http://10.42.1.1/`, so a PC or SBC on the USB side can do the setup
