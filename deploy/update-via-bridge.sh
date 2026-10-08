@@ -28,7 +28,7 @@ mnt="$(mktemp -d)"
 cleanup() {
     set +e
     sudo umount "$mnt" 2>/dev/null
-    sudo pkill -f "sdusb -p $port nbd" 2>/dev/null
+    sudo pkill -f "sdusb -p $port --force nbd" 2>/dev/null
     sleep 1
     "$sdusb" -p "$port" unlock >/dev/null 2>&1
     rmdir "$mnt" 2>/dev/null
