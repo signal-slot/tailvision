@@ -26,7 +26,13 @@ const GADGET: &str = "tailvision";
 /// Digitizer logical range on both axes.
 pub const TOUCH_MAX: u16 = 32767;
 
-/// Single-touch digitizer: tip switch, in-range, 6 bits padding, X, Y (16-bit each).
+/// Single-touch digitizer: tip switch, 7 bits padding, X, Y (16-bit each).
+///
+/// No "In Range" usage: Linux maps it to BTN_TOOL_FINGER, and a device with
+/// BTN_TOOL_FINGER but no INPUT_PROP_DIRECT is a touchpad to udev
+/// (ID_INPUT_TOUCHPAD), so libinput turned taps into nothing and moves into
+/// relative motion. With just the tip switch and absolute X/Y it is a
+/// touchscreen to Linux, Android and Windows alike.
 const TOUCH_REPORT_DESC: &[u8] = &[
     0x05, 0x0D, // Usage Page (Digitizers)
     0x09, 0x04, // Usage (Touch Screen)
@@ -39,9 +45,7 @@ const TOUCH_REPORT_DESC: &[u8] = &[
     0x75, 0x01, //     Report Size (1)
     0x95, 0x01, //     Report Count (1)
     0x81, 0x02, //     Input (Data,Var,Abs)
-    0x09, 0x32, //     Usage (In Range)
-    0x81, 0x02, //     Input (Data,Var,Abs)
-    0x95, 0x06, //     Report Count (6)
+    0x95, 0x07, //     Report Count (7)
     0x81, 0x03, //     Input (Const) padding
     0x05, 0x01, //     Usage Page (Generic Desktop)
     0x09, 0x30, //     Usage (X)
@@ -229,9 +233,37 @@ impl Gadget {
                 )?;
             }
         }
-        let bound = fs::read_to_string(g.join("UDC"))
+        let mut bound = fs::read_to_string(g.join("UDC"))
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
+        // A gadget left by an earlier run keeps its old descriptors: refresh
+        // any that this build changed. f_hid refuses the write (EBUSY) while
+        // the function is part of a configuration, so unbind, unlink it from
+        // the config, write, link it back; the host re-enumerates on rebind.
+        for (name, desc, len) in [
+            ("hid.touch", TOUCH_REPORT_DESC, TOUCH_REPORT_LEN),
+            ("hid.keyboard", KEYBOARD_REPORT_DESC, KEYBOARD_REPORT_LEN),
+        ] {
+            let f = g.join("functions").join(name);
+            if fs::read(f.join("report_desc")).ok().as_deref() == Some(desc) {
+                continue;
+            }
+            if bound {
+                write(g.join("UDC"), "").context("unbind gadget to update descriptors")?;
+                bound = false;
+            }
+            let link = g.join("configs/c.1").join(name);
+            let linked = link.symlink_metadata().is_ok();
+            if linked {
+                fs::remove_file(&link)?;
+            }
+            write(f.join("report_length"), len.to_string())?;
+            write(f.join("report_desc"), desc)?;
+            if linked {
+                std::os::unix::fs::symlink(&f, &link)?;
+            }
+            tracing::info!(function = name, "USB HID report descriptor updated");
+        }
         if !bound {
             write(g.join("UDC"), &udc).context("bind gadget to the UDC")?;
         }
@@ -259,7 +291,7 @@ impl Gadget {
     }
 
     fn touch_report(&self, down: bool, x: u16, y: u16) -> Result<()> {
-        let flags = if down { 0b11 } else { 0b00 };
+        let flags = if down { 0b1 } else { 0b0 };
         let [xl, xh] = x.min(TOUCH_MAX).to_le_bytes();
         let [yl, yh] = y.min(TOUCH_MAX).to_le_bytes();
         Self::send(&self.touch, &[flags, xl, xh, yl, yh])
@@ -457,7 +489,7 @@ mod tests {
 
     #[test]
     fn descriptors_have_sane_sizes() {
-        assert_eq!(TOUCH_REPORT_DESC.len(), 49);
+        assert_eq!(TOUCH_REPORT_DESC.len(), 45);
         assert_eq!(KEYBOARD_REPORT_DESC.len(), 63);
         let (a, b) = mac_pair();
         assert_ne!(a, b);
