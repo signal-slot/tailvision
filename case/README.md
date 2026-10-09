@@ -4,7 +4,7 @@ A printed case for the unit: Raspberry Pi Zero W (or Zero 2 W) with Camera
 Module 3. It is meant to hang lens-down over a panel like a document camera,
 held by whatever cheap arm is at hand: the back and the ends are flat so a
 phone-holder clamp can grip it lengthwise or a rubber band can hold it. The
-only opening is the USB port that powers the unit.
+only openings are the USB port that powers the unit and the microSD slot.
 
 `case.py` is the model (parameters at the top), `stl/` the printed parts,
 `preview.png` a render. Dimensions come from the official Zero and Camera
@@ -17,7 +17,7 @@ the walls, tubes and bosses.
 
 | | |
 |---|---|
-| `stl/body.stl` | Pi on four pegs rising from the floor, one opening for the USB port, a 6 mm pocket at the camera end where the cable U-turns, flat back |
+| `stl/body.stl` | Pi on four pegs rising from the floor, openings for the USB port and the microSD, a 6 mm pocket at the camera end where the cable U-turns, flat back |
 | `stl/lid.stl` | carries the camera lens-out on four pegs and two clips; snaps into the body, and four posts hold the Pi down on the body's pegs |
 
 No screws. Besides the Pi and the camera:
@@ -35,7 +35,7 @@ No supports. PLA or PETG, 0.2 mm layers, 3 walls. The snap ridges, the camera cl
 
 ## Assembly
 
-1. Press the Pi onto the four pegs, USB port at the opening. Mini HDMI, PWR IN and the microSD are closed: take the lid off to swap the card. The camera connector end faces the pocket.
+1. Press the Pi onto the four pegs, USB port at the opening, microSD slot at the end wall (the card goes in and out through it). Mini HDMI and PWR IN are closed. The camera connector end faces the pocket.
 2. Press the camera onto the lid's four pegs, lens through the window, connector edge toward the pocket end of the lid, until the two clips snap over its long edges.
 3. Plug the 38 mm cable into the Pi (contacts toward the board), fold it up and back over the Pi edge, plug it into the camera (contacts toward the camera board).
 4. Lower the lid, lip inside the walls, and press the long sides until the ridges click into the wall grooves. The posts land on the Pi around its holes. To open, pry a long side up at an end.

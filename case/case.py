@@ -2,10 +2,10 @@
 """Case for a tailvision unit: Raspberry Pi Zero W + Camera Module 3.
 
 Two printed parts, no supports, no screws, no glue:
-  body   - holds the Pi on four pegs rising from the floor, one opening for
-           the USB port (the one that powers the unit), and a pocket at the
-           camera end for the cable to U-turn; the back is flat. The microSD
-           is reached by taking the lid off.
+  body   - holds the Pi on four pegs rising from the floor, an opening for
+           the USB port (the one that powers the unit), a slot for the
+           microSD card in the end wall, and a pocket at the camera end for
+           the cable to U-turn; the back is flat.
   lid    - carries the camera (lens out) on pegs and two clips, and snaps
            into the body: ridges on its lip drop into grooves in the long
            walls. Four posts press the Pi onto the body's pegs.
@@ -56,10 +56,13 @@ LIP_T, LIP_H, LIP_CLR = 1.0, 3.0, 0.2
 SNAP_PROUD, SNAP_H, SNAP_LEN, SNAP_Z = 0.6, 1.0, 10.0, 1.9   # ridges on the lip, SNAP_Z below the plate
 GROOVE_D, GROOVE_H = 0.5, 2.0                           # matching grooves in the long walls
 
-# the only opening: the USB (OTG) port, which carries power too. Mini HDMI
-# (x 12.4), PWR IN (x 54.0) and the microSD stay closed. Heights relative to Pi top.
+# openings: the USB (OTG) port, which carries power too, and a slot for the
+# microSD, which sticks out past the board edge by about 2 mm when it is in
+# (so a closed wall at 0.4 mm keeps the card from seating). Mini HDMI (x 12.4)
+# and PWR IN (x 54.0) stay closed. Heights relative to Pi top.
 USB_X, USB_W, USB_Z = 41.4, 11.0, (-2.0, 5.0)
-SD_Y = 16.9
+SD_Y, SD_W, SD_Z = 16.9, 13.0, (-0.4, 2.6)   # card is 11 wide, 1 thick, 0.3..1.3 above the board
+SD_OUT = 2.0                                  # how far the seated card protrudes past the board edge
 
 # camera module 3: u across the 25 mm width, v up from the connector edge
 CAM_W, CAM_H = 25.0, 23.862
@@ -128,6 +131,8 @@ def body():
     b -= box(IN_X0 + IN_R, IN_Y0 + IN_W - 0.01, z0, IN_L - 2 * IN_R, GROOVE_D + 0.01, GROOVE_H)
     # USB port on the y = 0 wall
     b -= box(USB_X - USB_W / 2, OUT_Y0 - 1, Z_PT + USB_Z[0], USB_W, WALL + PORT_CLR + 2, USB_Z[1] - USB_Z[0])
+    # microSD slot through the x = 0 end wall
+    b -= box(OUT_X0 - 1, SD_Y - SD_W / 2, Z_PT + SD_Z[0], WALL + CLR + 2, SD_W, SD_Z[1] - SD_Z[0])
     return b
 
 
@@ -186,6 +191,7 @@ def mock_pi():
     for x in (USB_X, 54.0):
         p += box(x - 4.0, -1.0, Z_PT, 8.0, 6.5, 2.9)              # micro USB
     p += box(0, SD_Y - 7, Z_PT, 14.0, 14.0, 1.5)                  # microSD socket
+    p += box(-SD_OUT, SD_Y - 5.5, Z_PT + 0.3, SD_OUT + 10.0, 11.0, 1.0)  # seated card, sticking out
     p += box(60.0, 7.0, Z_PT, 5.0, 16.0, 1.6)                     # CSI connector
     p += box(24.0, 8.0, Z_PT, 14.0, 14.0, 1.5)                    # SoC
     return p
