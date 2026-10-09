@@ -507,6 +507,30 @@ fn filled_mask(w: u32, h: u32, q: &Quad) -> GrayImage {
     m
 }
 
+/// Median grey level under the mask: the background of a UI, unmoved by its
+/// bright text and panels, where the mean would be.
+fn median_under(gray: &GrayImage, mask: &GrayImage) -> Option<f32> {
+    let mut hist = [0u32; 256];
+    let mut n = 0u32;
+    for (g, m) in gray.pixels().zip(mask.pixels()) {
+        if m[0] > 0 {
+            hist[g[0] as usize] += 1;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let mut seen = 0u32;
+    for (v, c) in hist.iter().enumerate() {
+        seen += c;
+        if seen * 2 >= n {
+            return Some(v as f32);
+        }
+    }
+    Some(255.0)
+}
+
 fn mean_under(gray: &GrayImage, mask: &GrayImage) -> Option<f32> {
     let (mut sum, mut n) = (0u64, 0u64);
     for (g, m) in gray.pixels().zip(mask.pixels()) {
@@ -518,13 +542,19 @@ fn mean_under(gray: &GrayImage, mask: &GrayImage) -> Option<f32> {
     (n > 0).then(|| sum as f32 / n as f32)
 }
 
-/// (contrast, outside_uniformity): how real the quad's boundary is, as the
-/// brightness step between a thin ring just inside and just outside it
-/// (saturating at ~20 grey levels), and how uniform the outside ring is.
-/// An LCD's edge is bordered by its bezel, which is plain; the bezel's own
-/// outer edge is bordered by the board or desk, which is cluttered. That
-/// tells the two apart when both have a crisp step.
-fn border_contrast(gray: &GrayImage, q: &Quad, band: u8) -> (f32, f32) {
+/// (contrast, outside_uniformity, inner_fit): how real the quad's boundary
+/// is, as the brightness step between a thin ring just inside and just
+/// outside it (saturating at ~20 grey levels); how uniform the outside ring
+/// is; and how close the inside ring's median is to the median of the quad's
+/// interior (medians, so a dark UI's bright text does not count as its
+/// background). An LCD's edge is bordered by its bezel, which is plain; the
+/// bezel's own outer edge is bordered by the board or desk, which is
+/// cluttered. And the ring just inside an LCD's edge is panel like the rest
+/// of the quad, while the ring just inside the bezel's outer edge is bezel
+/// around a panel of another brightness. Together they tell the two apart
+/// when both have a crisp step, even when a sticker or a logo clutters the
+/// bezel.
+fn border_contrast(gray: &GrayImage, q: &Quad, band: u8) -> (f32, f32, f32) {
     // Leave a small gap between the quad's edge and both rings so that a
     // candidate that sits a pixel or two off the real edge is not judged by
     // the anti-aliased edge pixels themselves.
@@ -546,9 +576,13 @@ fn border_contrast(gray: &GrayImage, q: &Quad, band: u8) -> (f32, f32) {
     let inside = ring(&inner_a, &inner_b);
     let outside = ring(&outer_b, &outer_a);
     let (Some(a), Some(b)) = (mean_under(gray, &inside), mean_under(gray, &outside)) else {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 0.0);
     };
     let contrast = ((a - b).abs() / 255.0 / 0.08).min(1.0);
+    let inner_fit = match (median_under(gray, &inside), median_under(gray, &inner_b)) {
+        (Some(ring), Some(interior)) => (1.0 - (ring - interior).abs() / 255.0 / 0.25).clamp(0.0, 1.0),
+        _ => 0.0,
+    };
     let (mut sum2, mut n) = (0.0f64, 0u32);
     for (g, m) in gray.pixels().zip(outside.pixels()) {
         if m[0] > 0 {
@@ -557,7 +591,7 @@ fn border_contrast(gray: &GrayImage, q: &Quad, band: u8) -> (f32, f32) {
         }
     }
     let std = (sum2 / n.max(1) as f64).sqrt() as f32;
-    (contrast, (1.0 - std / 40.0).clamp(0.0, 1.0))
+    (contrast, (1.0 - std / 40.0).clamp(0.0, 1.0), inner_fit)
 }
 
 /// True when the quad traces the whole camera view rather than a framed screen.
@@ -759,10 +793,11 @@ pub fn find_screen_quad(rgb: &RgbImage, min_area_ratio: f32) -> Option<Quad> {
             );
             continue;
         }
-        let (mut boundary, outside_plain) = border_contrast(&gray, &q, band);
+        let (mut boundary, outside_plain, mut inner_fit) = border_contrast(&gray, &q, band);
         if origin == "ui" {
             // Bounded by the content rather than by a bezel step.
             boundary = boundary.max(0.5);
+            inner_fit = 1.0;
         }
         let area_ratio = (q.area() / frame_area).min(0.90);
         let aspect = aspect_score(&q);
@@ -780,17 +815,18 @@ pub fn find_screen_quad(rgb: &RgbImage, min_area_ratio: f32) -> Option<Quad> {
             };
             sub_element
                 * boundary
-                * (0.30 * aspect
+                * (0.25 * aspect
                     + 0.05 * area_ratio
-                    + 0.30 * coverage
-                    + 0.15 * outside_plain
-                    + 0.20 * tight)
+                    + 0.25 * coverage
+                    + 0.10 * outside_plain
+                    + 0.15 * tight
+                    + 0.20 * inner_fit)
         } else {
-            boundary * (0.45 * aspect + 0.35 * area_ratio + 0.20 * outside_plain)
+            boundary * (0.35 * aspect + 0.30 * area_ratio + 0.15 * outside_plain + 0.20 * inner_fit)
         };
         #[cfg(test)]
         eprintln!(
-            "  {origin:6} score={score:.3} boundary={boundary:.2} plain={outside_plain:.2} tight={tight:.2} aspect={aspect:.2} area={area_ratio:.2} cov={coverage:.2} {:?}",
+            "  {origin:6} score={score:.3} boundary={boundary:.2} plain={outside_plain:.2} fit={inner_fit:.2} tight={tight:.2} aspect={aspect:.2} area={area_ratio:.2} cov={coverage:.2} {:?}",
             q.0.map(|p| (p.0 as i32, p.1 as i32))
         );
         if boundary <= 0.0 || score <= 0.0 {
@@ -1127,7 +1163,11 @@ mod tests {
 
     #[test]
     fn detects_the_lcd_in_the_fixture_photos() {
-        for name in ["scene01_dark_ui_slint.png", "scene02_dashboard_dark.png"] {
+        for name in [
+            "scene01_dark_ui_slint.png",
+            "scene02_dashboard_dark.png",
+            "scene03_bright_tablet_bezel.png",
+        ] {
             let frame = fixture(name);
             let dir = format!(
                 concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/{}"),
