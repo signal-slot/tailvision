@@ -184,6 +184,7 @@ mDNS で引ける。
   ショットキーダイオードを入れて 5V を逆流させない。
 - 8GB 以上の microSD。
 - 書画カメラのようなアームで、カメラをパネルの上に保持するもの。
+  [case/](case/) に印刷用ケースがあります。
 
 UVC ウェブカメラを使う場合は、OTG ケーブルで **USB** ポートに挿し、電源は
 **PWR IN** から取り、`config.txt` の `dtoverlay=dwc2,dr_mode=peripheral` の行を

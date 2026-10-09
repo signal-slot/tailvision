@@ -218,6 +218,7 @@ or in `.mcp.json`:
   target cable so the unit does not back-feed 5 V into it.
 - An 8 GB or larger microSD card.
 - A document-camera style arm or mount that keeps the camera over the panel.
+  [case/](case/) has a printable case for that.
 
 With a UVC webcam instead: plug it into the **USB** port through an OTG
 cable, power the unit from **PWR IN**, and delete the

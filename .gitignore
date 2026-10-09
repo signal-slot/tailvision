@@ -3,3 +3,4 @@
 /build
 /deploy/image.env
 /.claude/
+__pycache__/
