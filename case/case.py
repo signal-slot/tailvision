@@ -72,7 +72,7 @@ CAM_BOTTOM_X = 57.0         # where the connector edge (v = 0) sits, toward the 
 CAM_CY = 15.0               # camera centre line = Pi centre line
 CAM_BOSS_D, CAM_BOSS_H = 4.2, 1.2
 CAM_PEG_D, CAM_PEG_H = 1.4, 2.0           # into the camera's 2.2 mm holes; 1.9 printed too fat
-CLIP_T, CLIP_W, CLIP_BARB, CLIP_CLR = 1.0, 6.0, 0.6, 0.15   # clips over the board's long edges
+CLIP_T, CLIP_W, CLIP_BARB, CLIP_CLR = 1.0, 6.0, 0.6, 0.4    # clips over the board's long edges; 0.15 printed too tight
 WINDOW_CLR = 0.4
 
 # ---- derived ---------------------------------------------------------------
