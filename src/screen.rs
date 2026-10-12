@@ -580,7 +580,9 @@ fn border_contrast(gray: &GrayImage, q: &Quad, band: u8) -> (f32, f32, f32) {
     };
     let contrast = ((a - b).abs() / 255.0 / 0.08).min(1.0);
     let inner_fit = match (median_under(gray, &inside), median_under(gray, &inner_b)) {
-        (Some(ring), Some(interior)) => (1.0 - (ring - interior).abs() / 255.0 / 0.25).clamp(0.0, 1.0),
+        (Some(ring), Some(interior)) => {
+            (1.0 - (ring - interior).abs() / 255.0 / 0.25).clamp(0.0, 1.0)
+        }
         _ => 0.0,
     };
     let (mut sum2, mut n) = (0.0f64, 0u32);

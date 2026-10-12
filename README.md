@@ -46,9 +46,13 @@ phone / PC ──(Wi-Fi or setup hotspot)──▶ setup page http://tailvision-
 | `type_text`       | text    | Type ASCII text on the USB keyboard                                   |
 | `calibrate_camera`| image   | Measure focus/exposure/white balance once and lock them (`lock=false` to undo) |
 | `press_key`       | text    | One key with modifiers, e.g. `enter`, `ctrl`+`c`, `f5`                |
-| `list_formats`    | text    | Pixel formats and frame sizes a UVC camera offers                     |
+| `list_formats`    | text    | Pixel formats and frame sizes of a UVC camera; sensor and modes of a CSI module |
 
-`take_screenshot` finds the screen on every call (the camera need not be
+The server's MCP instructions tell an agent how to drive a device with
+these: screenshot, act, screenshot again; coordinates are pixels of the last
+screenshot; what to do when detection is off (dark screens, a screen that
+overflows the frame, stickers on the bezel); that keys go through the device's
+input method. `take_screenshot` finds the screen on every call (the camera need not be
 fixed). Parameters: `raw=true` returns the whole camera frame;
 `reuse_detection=true` keeps the previous corners (faster on a fixed rig);
 `manual_corners=[[x,y],...]` overrides detection; `output_width`/`output_height`,

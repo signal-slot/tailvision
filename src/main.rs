@@ -34,7 +34,9 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use clap::Parser;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ErrorData, ServerCapabilities, ServerConfig};
+use rmcp::model::{
+    CallToolResult, ContentBlock, ErrorData, Implementation, ServerCapabilities, ServerConfig,
+};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
@@ -289,12 +291,25 @@ impl Camera {
         Ok(())
     }
 
-    async fn formats(&self) -> anyhow::Result<Vec<capture::FormatInfo>> {
+    /// What the camera can capture: V4L2's format list for a UVC webcam,
+    /// libcamera's camera list (sensor, modes) for a CSI module, where the
+    /// V4L2 node is the ISP's and lists every format at a meaningless size.
+    async fn formats(&self) -> anyhow::Result<String> {
         let _guard = self.lock.lock().await;
+        if matches!(self.backend, capture::Backend::Csi { .. }) {
+            return tokio::task::spawn_blocking(libcamera::describe)
+                .await
+                .context("camera list task");
+        }
         let device = self.cli.device.clone();
-        tokio::task::spawn_blocking(move || capture::list_formats(&device))
+        let formats = tokio::task::spawn_blocking(move || capture::list_formats(&device))
             .await
-            .context("format task")?
+            .context("format task")??;
+        Ok(formats
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }
 
@@ -481,7 +496,7 @@ impl TailvisionServer {
 
     #[tool(
         name = "type_text",
-        description = "Type text on the device through the USB keyboard (printable ASCII, newline = Enter, tab = Tab).",
+        description = "Type text on the device through the USB keyboard (US layout, printable ASCII, newline = Enter, tab = Tab; other characters are skipped). Keys go through whatever the device has focused, its input method included.",
         annotations(read_only_hint = false, idempotent_hint = false)
     )]
     async fn type_text(
@@ -590,28 +605,65 @@ impl TailvisionServer {
 
     #[tool(
         name = "list_formats",
-        description = "List the pixel formats and frame sizes the webcam supports.",
+        description = "What the camera can capture: pixel formats and frame sizes of a UVC webcam, or the sensor and its modes for a CSI camera module.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     async fn list_formats(&self) -> Result<CallToolResult, ErrorData> {
-        let formats = self.camera.formats().await.map_err(tool_error)?;
-        let text = formats
-            .iter()
-            .map(|f| f.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = self.camera.formats().await.map_err(tool_error)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 }
 
+/// What an agent needs to know to drive a device through this unit.
+const INSTRUCTIONS: &str = "\
+tailvision is a camera looking at a device's LCD, plus a USB touchscreen and keyboard plugged into that \
+same device. The loop is: take_screenshot, read it, act with tap / swipe / type_text / press_key, then \
+take_screenshot again to see the result. Nothing here reads the device's state except through the camera.\n\
+\n\
+Screenshots. take_screenshot finds the LCD in the camera frame and returns just the screen, \
+perspective-corrected. Its reply says how it went: the corners it used (Auto, Cached or Manual) and \
+how much of the frame the screen fills. tap and swipe coordinates are pixels of the LAST take_screenshot \
+image, whatever its size and rotation, so take a screenshot before tapping and after every action. The \
+image comes out the way the camera sees it; the unit never guesses which way is up. If text reads \
+sideways or upside down, pass rotation_degrees (90, 180 or 270) and keep passing it. output_width \
+(800-1280) gives smaller, faster images for reading a layout; omit it to read small text. When the camera \
+has not moved, reuse_detection=true skips detection and is faster.\n\
+\n\
+When detection is off (fill far from 30-70%, corners not on the LCD, bezel or desk in the picture), call \
+capture_debug: the raw frame with the chosen outline drawn on it (big dot = top-left). Usual causes: the \
+screen shows mostly dark content (the detector looks for a lit panel: put something bright on the device \
+first, or pin the corners), the screen overflows the frame (move the camera back), a sticker or light \
+object on the bezel, reflections. Remedies: min_area_ratio (0.2-0.4) ignores small candidates such as \
+windows or icons; margin_ratio (0.01-0.03) trims a sliver of bezel; manual_corners=[[x,y],[x,y],[x,y],[x,y]] \
+in raw-frame pixels, read off capture_debug, pins the screen until the camera moves.\n\
+\n\
+Touch. Taps go to whatever the unit's USB cable is plugged into, scaled to that device's whole display, \
+so the camera must be looking at that display. tap is finger down for hold_ms (default 60) then up; \
+800+ for a long press. swipe drags between two points over duration_ms (scroll, slide to unlock, \
+drag). Expect the device to take a moment: screenshot again rather than tapping twice.\n\
+\n\
+Keyboard. US layout. type_text sends printable ASCII; \\n is Enter, \\t is Tab, anything else is \
+skipped (no kana, no accents). press_key sends one named key (enter, esc, tab, backspace, space, \
+arrows, home, end, pageup, pagedown, delete, f1-f12, or a character) with modifiers such as ctrl, \
+ctrl+shift, alt, gui. Keys land in whatever the device has focused, including its input method: on a \
+device with a Japanese IME in kana mode, letters turn into kana and Enter confirms the conversion \
+instead of submitting. Check the screenshot after typing; switch the IME off first when it matters.\n\
+\n\
+calibrate_camera locks focus, exposure and white balance as they are now, for consistent and faster \
+shots on a fixed rig; lock=false returns to automatic. Redo it when the camera, the device or the \
+lighting moves. list_formats tells what the camera can capture.";
+
 #[tool_handler]
 impl ServerHandler for TailvisionServer {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "take_screenshot returns the device's screen, found in the camera frame and perspective-corrected. \
-             Coordinates for tap/swipe are pixels of the last take_screenshot image. \
-             capture_debug shows the detected outline on the raw frame; use raw=true or manual_corners if detection is off.",
-        )
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+                    .with_description(
+                        "Camera KVM: screenshots of a device's LCD, USB touch and keyboard into it",
+                    ),
+            )
+            .with_instructions(INSTRUCTIONS)
     }
 }
 
