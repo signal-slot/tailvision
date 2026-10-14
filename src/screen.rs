@@ -1250,6 +1250,31 @@ mod tests {
     }
 
     #[test]
+    fn measures_the_lens_from_the_screen_edges() {
+        use imageproc::geometric_transformations::warp_with;
+        let truth = Quad([(70.0, 80.0), (890.0, 80.0), (890.0, 620.0), (70.0, 620.0)]);
+        let ideal = synthetic_scene(truth, [120, 125, 130], [15, 15, 15], 150);
+        let (w, h) = ideal.dimensions();
+        let start = crate::lens::IMX708_WIDE.at(w, h, None);
+        for actual in [-0.09f32, -0.0365, -0.01] {
+            let real = crate::lens::IMX708_WIDE.with_lambda(actual).at(w, h, None);
+            let seen = warp_with(
+                &ideal,
+                |x, y| real.undistort((x, y)),
+                Interpolation::Bilinear,
+                Border::Constant(Rgb([0, 0, 0])),
+            );
+            let m = crate::lens::measure(&seen, &start).unwrap();
+            eprintln!("actual {actual}: {m}");
+            assert!(
+                (m.lambda - actual).abs() < 0.01,
+                "actual {actual}, measured {m}"
+            );
+            assert!(m.rms_px < 1.0, "{m}");
+        }
+    }
+
+    #[test]
     fn detects_the_lcd_in_the_fixture_photos() {
         for name in [
             "scene01_dark_ui_slint.png",

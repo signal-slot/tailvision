@@ -13,6 +13,10 @@ pub struct Config {
     /// setup page's "Calibrate" or the calibrate_camera tool. None = automatic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_lock: Option<crate::libcamera::CameraLock>,
+    /// Barrel distortion of a wide-angle CSI module as calibrate_camera
+    /// measured it. None = the built-in estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_lambda: Option<f32>,
 }
 
 pub struct Store {

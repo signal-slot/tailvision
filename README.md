@@ -219,9 +219,11 @@ or in `.mcp.json`:
   OV5647 (fixed focus), with the 22-pin Zero camera ribbon cable.
   Camera Module 3 Wide (102° horizontal) works too: when libcamera reports
   `imx708_wide` the barrel distortion is undone automatically, for whatever
-  part of the sensor the frame shows. The amount is estimated from the
-  datasheet's field of view, not yet measured on a real module;
-  `--lens-lambda` overrides it and 0 turns it off.
+  part of the sensor the frame shows. The amount starts as an estimate from
+  the datasheet's field of view; calibrate_camera measures it from the
+  screen's edges, which must come out straight (have the screen large in the
+  frame and showing something bright). `--lens-lambda` overrides both and 0
+  turns the correction off.
 - A micro-B to USB-A cable from the port marked **USB** to the device under
   test. That one cable carries power, touch and keyboard.
   To keep the unit alive while the target is power-cycled, feed **PWR IN**

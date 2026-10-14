@@ -7,8 +7,15 @@
 //! is barrel. The corrected frame has the camera frame's size and keeps the
 //! midpoints of its left and right edges, so it shows the same width of the
 //! scene; the corners, which barrel distortion squeezes in, are cropped.
+//!
+//! λ starts as an estimate from the datasheet and is measured on the rig by
+//! `measure`: the LCD's edges are straight, so the λ that straightens them is
+//! the lens's (the plumb-line method). No dimensions of the screen are needed.
 
-use image::{Rgb, RgbImage};
+use anyhow::{Result, bail};
+use image::{GrayImage, Rgb, RgbImage, imageops};
+use imageproc::edges::canny;
+use imageproc::filter::gaussian_blur_f32;
 use imageproc::geometric_transformations::{Border, Interpolation, warp_with};
 
 use crate::libcamera::ScalerCrop;
@@ -27,7 +34,7 @@ pub struct Profile {
 /// Camera Module 3 Wide: 2.75 mm lens on the IMX708 (4608 × 2592 at 1.4 µm).
 /// Raspberry Pi publishes no distortion data; the default λ is fitted to the
 /// datasheet's 102° horizontal field of view, which a 2.75 mm pinhole would
-/// only reach at 99°. Not yet measured on a real module.
+/// only reach at 99°. calibrate_camera measures the real one.
 pub const IMX708_WIDE: Profile = Profile {
     name: "Camera Module 3 Wide",
     sensor: (4608, 2592),
@@ -101,13 +108,16 @@ impl Lens {
         }
     }
 
+    pub fn with_lambda(&self, lambda: f32) -> Self {
+        Self::new(self.cx, self.cy, self.f, lambda)
+    }
+
     /// The same lens for the frame resized by `k`.
     pub fn scaled(&self, k: f32) -> Self {
         Self::new(self.cx * k, self.cy * k, self.f * k, self.lambda)
     }
 
     /// Camera pixel → corrected pixel.
-    #[cfg_attr(not(test), allow(dead_code))] // only tests map this way so far
     pub fn undistort(&self, p: Pt) -> Pt {
         let (x, y) = ((p.0 - self.cx) / self.f, (p.1 - self.cy) / self.f);
         let s = self.f_out / (1.0 + self.lambda * (x * x + y * y));
@@ -132,6 +142,236 @@ impl Lens {
             Border::Constant(Rgb([0, 0, 0])),
         )
     }
+}
+
+/// What `measure` found.
+#[derive(Debug, Clone, Copy)]
+pub struct Measurement {
+    pub lambda: f32,
+    /// RMS distance of the screen's edge points from straight lines, in
+    /// camera pixels: with the measured λ, with the λ it started from, and
+    /// with no correction at all.
+    pub rms_px: f32,
+    pub rms_px_before: f32,
+    pub rms_px_uncorrected: f32,
+    pub points: usize,
+}
+
+impl std::fmt::Display for Measurement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "λ {:.4}: screen edges straight to {:.2} px RMS ({:.2} px before, {:.2} px uncorrected; {} edge points)",
+            self.lambda, self.rms_px, self.rms_px_before, self.rms_px_uncorrected, self.points
+        )
+    }
+}
+
+/// Measures λ from the screen in `frame`: finds the LCD with `lens`, gathers
+/// the edge pixels along its four sides and picks the λ under which they lie
+/// on straight lines. Two rounds, the second starting from the first's λ,
+/// so the edge points are gathered close to where they really are.
+pub fn measure(frame: &RgbImage, lens: &Lens) -> Result<Measurement> {
+    let first = measure_once(frame, lens)?;
+    let second = measure_once(frame, &lens.with_lambda(first.lambda))?;
+    Ok(Measurement {
+        rms_px_before: first.rms_px_before,
+        ..second
+    })
+}
+
+/// Longest side of the image the edge points are taken from.
+const MEASURE_SIZE: u32 = 1024;
+/// Fewest edge points for a side to count, and fewest sides.
+const MIN_POINTS: usize = 30;
+const MIN_SIDES: usize = 3;
+
+fn measure_once(frame: &RgbImage, lens: &Lens) -> Result<Measurement> {
+    let quad = crate::screen::detect(frame, 0.05, Some(lens))?;
+    let k = (MEASURE_SIZE as f32 / frame.width().max(frame.height()) as f32).min(1.0);
+    let small = if k < 1.0 {
+        imageops::resize(
+            frame,
+            (frame.width() as f32 * k).round().max(1.0) as u32,
+            (frame.height() as f32 * k).round().max(1.0) as u32,
+            imageops::FilterType::Triangle,
+        )
+    } else {
+        frame.clone()
+    };
+    let ls = lens.scaled(k);
+    let corners = quad.0.map(|p| (p.0 * k, p.1 * k));
+
+    let gray = gaussian_blur_f32(&imageops::grayscale(&small), 1.2);
+    let hi = (1.33 * median(&gray)).clamp(25.0, 90.0);
+    let edges = canny(&gray, hi * 0.4, hi);
+    let band = (0.012 * small.width().max(small.height()) as f32).max(4.0);
+
+    // Edge pixels near each side, in normalised camera coordinates (centre
+    // at the optical axis, unit = focal length), away from the corners.
+    let mut sides: [Vec<Pt>; 4] = Default::default();
+    for (x, y, p) in edges.enumerate_pixels() {
+        if p[0] == 0 {
+            continue;
+        }
+        let u = ls.undistort((x as f32, y as f32));
+        let mut best: Option<(usize, f32)> = None;
+        for i in 0..4 {
+            let (a, b) = (corners[i], corners[(i + 1) % 4]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len2 = dx * dx + dy * dy;
+            if len2 < 1.0 {
+                continue;
+            }
+            let t = ((u.0 - a.0) * dx + (u.1 - a.1) * dy) / len2;
+            if !(0.08..=0.92).contains(&t) {
+                continue;
+            }
+            let d = ((u.0 - a.0) * dy - (u.1 - a.1) * dx).abs() / len2.sqrt();
+            if d < band && best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        if let Some((i, _)) = best {
+            sides[i].push(((x as f32 - ls.cx) / ls.f, (y as f32 - ls.cy) / ls.f));
+        }
+    }
+
+    // Drop what is not the edge itself (UI next to it, the bezel's outer
+    // edge): points far from the side's line under the starting λ.
+    let sides: Vec<Vec<Pt>> = sides
+        .into_iter()
+        .map(|pts| trim_outliers(pts, lens.lambda, 1.0 / ls.f))
+        .filter(|pts| pts.len() >= MIN_POINTS)
+        .collect();
+    if sides.len() < MIN_SIDES {
+        bail!(
+            "found clear edge points on only {} of the screen's sides; show something bright on the device and keep the whole screen in view",
+            sides.len()
+        );
+    }
+    let reach = sides
+        .iter()
+        .flatten()
+        .map(|p| (p.0 * p.0 + p.1 * p.1).sqrt())
+        .fold(0.0, f32::max);
+    if reach < 0.6 {
+        bail!(
+            "the screen is too small in the frame to measure the lens; move the camera closer so the screen nearly fills the frame"
+        );
+    }
+
+    let cost = |l: f32| straightness(&sides, l);
+    let (mut lo, mut hi) = (-0.30f32, 0.10f32);
+    let mut best = lens.lambda;
+    let mut best_cost = cost(best);
+    let mut l = lo;
+    while l <= hi + 1e-6 {
+        let c = cost(l);
+        if c < best_cost {
+            (best, best_cost) = (l, c);
+        }
+        l += 0.005;
+    }
+    (lo, hi) = (best - 0.005, best + 0.005);
+    let g = 0.618_034f32;
+    for _ in 0..24 {
+        let (a, b) = (hi - g * (hi - lo), lo + g * (hi - lo));
+        if cost(a) < cost(b) {
+            hi = b;
+        } else {
+            lo = a;
+        }
+    }
+    let lambda = (lo + hi) / 2.0;
+    // Normalised distances back to (full-size) camera pixels.
+    let px = lens.f;
+    Ok(Measurement {
+        lambda,
+        rms_px: cost(lambda) * px,
+        rms_px_before: cost(lens.lambda) * px,
+        rms_px_uncorrected: cost(0.0) * px,
+        points: sides.iter().map(Vec::len).sum(),
+    })
+}
+
+/// Undistorts normalised camera coordinates with `lambda` (unit focal length).
+fn undistort_normalised(p: Pt, lambda: f32) -> Pt {
+    let s = 1.0 / (1.0 + lambda * (p.0 * p.0 + p.1 * p.1));
+    (p.0 * s, p.1 * s)
+}
+
+/// Sum of squared distances from the best-fit line (total least squares),
+/// and the residual of each point.
+fn line_fit(pts: &[Pt]) -> (f32, Vec<f32>) {
+    let n = pts.len() as f32;
+    let (mx, my) = pts
+        .iter()
+        .fold((0.0, 0.0), |(x, y), p| (x + p.0 / n, y + p.1 / n));
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for p in pts {
+        let (dx, dy) = (p.0 - mx, p.1 - my);
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
+    }
+    // Direction of the line: the major axis of the scatter.
+    let theta = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let (nx, ny) = (-theta.sin(), theta.cos());
+    let res: Vec<f32> = pts
+        .iter()
+        .map(|p| (p.0 - mx) * nx + (p.1 - my) * ny)
+        .collect();
+    (res.iter().map(|r| r * r).sum(), res)
+}
+
+fn trim_outliers(pts: Vec<Pt>, lambda: f32, min_spread: f32) -> Vec<Pt> {
+    if pts.len() < MIN_POINTS {
+        return pts;
+    }
+    let u: Vec<Pt> = pts
+        .iter()
+        .map(|p| undistort_normalised(*p, lambda))
+        .collect();
+    let (_, res) = line_fit(&u);
+    let mut abs: Vec<f32> = res.iter().map(|r| r.abs()).collect();
+    abs.sort_by(f32::total_cmp);
+    let limit = (3.0 * abs[abs.len() / 2]).max(min_spread);
+    pts.into_iter()
+        .zip(res)
+        .filter(|(_, r)| r.abs() <= limit)
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// RMS distance from straight lines of all sides' points under `lambda`.
+fn straightness(sides: &[Vec<Pt>], lambda: f32) -> f32 {
+    let (mut sum, mut n) = (0.0, 0usize);
+    for pts in sides {
+        let u: Vec<Pt> = pts
+            .iter()
+            .map(|p| undistort_normalised(*p, lambda))
+            .collect();
+        sum += line_fit(&u).0;
+        n += pts.len();
+    }
+    (sum / n.max(1) as f32).sqrt()
+}
+
+fn median(img: &GrayImage) -> f32 {
+    let mut hist = [0u32; 256];
+    for p in img.pixels() {
+        hist[p[0] as usize] += 1;
+    }
+    let half = img.width() * img.height() / 2;
+    let mut acc = 0;
+    for (v, c) in hist.iter().enumerate() {
+        acc += c;
+        if acc > half {
+            return v as f32;
+        }
+    }
+    255.0
 }
 
 #[cfg(test)]
@@ -226,5 +466,11 @@ mod tests {
             assert!(close(lens.undistort(p), p, 1e-3));
             assert!(close(lens.distort(p), p, 1e-3));
         }
+    }
+
+    #[test]
+    fn line_fit_is_zero_on_a_line() {
+        let pts: Vec<Pt> = (0..20).map(|i| (i as f32, 2.0 * i as f32 + 1.0)).collect();
+        assert!(line_fit(&pts).0 < 1e-6);
     }
 }

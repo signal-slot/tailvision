@@ -165,6 +165,8 @@ pub struct Camera {
     corners: Arc<pipeline::CornerCache>,
     /// Distortion of the CSI module's lens, when it needs undoing.
     lens: Option<lens::Profile>,
+    /// λ came from --lens-lambda: calibration measures but does not apply it.
+    lens_fixed: bool,
 }
 
 impl Camera {
@@ -235,8 +237,17 @@ impl Camera {
             manual_corners,
             reuse_detection: p.reuse_detection.unwrap_or(false),
             jpeg_quality: p.quality.unwrap_or(self.cli.quality),
-            lens: self.lens,
+            lens: self.lens_profile(),
         })
+    }
+
+    /// The lens with the measured λ when there is one.
+    fn lens_profile(&self) -> Option<lens::Profile> {
+        let p = self.lens?;
+        let measured = (!self.lens_fixed)
+            .then(|| self.config.try_read().ok().and_then(|c| c.lens_lambda))
+            .flatten();
+        Some(measured.map_or(p, |l| p.with_lambda(l)))
     }
 
     async fn screen(
@@ -258,8 +269,12 @@ impl Camera {
     }
 
     /// Measures focus / exposure / white balance on the CSI camera and stores
-    /// them as the lock for all later captures. Returns the lock and a preview.
-    pub async fn calibrate(&self) -> anyhow::Result<(libcamera::CameraLock, Vec<u8>)> {
+    /// them as the lock for all later captures; on a wide-angle module also
+    /// measures the lens distortion from the screen's edges. Returns the lock,
+    /// a preview and what the lens measurement found.
+    pub async fn calibrate(
+        &self,
+    ) -> anyhow::Result<(libcamera::CameraLock, Vec<u8>, Option<String>)> {
         let _guard = self.lock.lock().await;
         let capture::Backend::Csi {
             settle,
@@ -281,14 +296,36 @@ impl Camera {
             lock: None,
             extra_args,
         };
-        let (lock, frame) = tokio::task::spawn_blocking(move || libcamera::calibrate(&req))
-            .await
-            .context("calibration task")??;
+        let start = self.lens_profile();
+        let (lock, frame, measured) = tokio::task::spawn_blocking(move || {
+            let (lock, frame) = libcamera::calibrate(&req)?;
+            let measured = start.map(|p| {
+                let img = screen::decode_jpeg(&frame.jpeg)?;
+                lens::measure(&img, &p.at(img.width(), img.height(), frame.crop))
+            });
+            anyhow::Ok((lock, frame, measured))
+        })
+        .await
+        .context("calibration task")??;
         let mut cfg = self.config.read().await.clone();
         cfg.camera_lock = Some(lock.clone());
+        let note = match measured {
+            None => None,
+            Some(Err(e)) => Some(format!(
+                "lens not measured, keeping λ {:.4}: {e:#}",
+                self.lens_profile().map_or(0.0, |p| p.lambda)
+            )),
+            Some(Ok(m)) if self.lens_fixed => Some(format!(
+                "lens measured {m}; not applied because --lens-lambda is set"
+            )),
+            Some(Ok(m)) => {
+                cfg.lens_lambda = Some(m.lambda);
+                Some(format!("lens measured and applied: {m}"))
+            }
+        };
         self.store.save(&cfg)?;
         *self.config.write().await = cfg;
-        Ok((lock, frame.jpeg))
+        Ok((lock, frame.jpeg, note))
     }
 
     pub async fn unlock(&self) -> anyhow::Result<()> {
@@ -594,7 +631,7 @@ impl TailvisionServer {
 
     #[tool(
         name = "calibrate_camera",
-        description = "Measure focus, exposure and white balance once on the CSI camera and lock them for all later screenshots (consistent images, no settling). Pass lock=false to return to automatic.",
+        description = "Measure focus, exposure and white balance once on the CSI camera and lock them for all later screenshots (consistent images, no settling). On a wide-angle module it also measures the lens distortion from the screen's edges, so have the screen large in the frame and showing something bright. Pass lock=false to return to automatic.",
         annotations(read_only_hint = false, idempotent_hint = true)
     )]
     async fn calibrate_camera(
@@ -607,8 +644,13 @@ impl TailvisionServer {
                 "camera back to automatic focus, exposure and white balance",
             )]));
         }
-        let (lock, jpeg) = self.camera.calibrate().await.map_err(tool_error)?;
-        Ok(image_result(&jpeg, format!("camera locked: {lock}")))
+        let (lock, jpeg, lens) = self.camera.calibrate().await.map_err(tool_error)?;
+        let mut note = format!("camera locked: {lock}");
+        if let Some(l) = lens {
+            note.push_str("; ");
+            note.push_str(&l);
+        }
+        Ok(image_result(&jpeg, note))
     }
 
     #[tool(
@@ -658,8 +700,9 @@ device with a Japanese IME in kana mode, letters turn into kana and Enter confir
 instead of submitting. Check the screenshot after typing; switch the IME off first when it matters.\n\
 \n\
 calibrate_camera locks focus, exposure and white balance as they are now, for consistent and faster \
-shots on a fixed rig; lock=false returns to automatic. Redo it when the camera, the device or the \
-lighting moves. list_formats tells what the camera can capture.";
+shots on a fixed rig; lock=false returns to automatic. On a wide-angle module it also measures the \
+lens distortion from the screen's edges (screen large in the frame, showing something bright). Redo it \
+when the camera, the device or the lighting moves. list_formats tells what the camera can capture.";
 
 #[tool_handler]
 impl ServerHandler for TailvisionServer {
@@ -858,6 +901,7 @@ async fn main() -> anyhow::Result<()> {
             lock: Arc::new(Mutex::new(())),
             corners: corners.clone(),
             lens,
+            lens_fixed: cli.lens_lambda.is_some(),
         },
         cli: cli.clone(),
         config: config_shared.clone(),
