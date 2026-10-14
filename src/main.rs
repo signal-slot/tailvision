@@ -10,6 +10,7 @@ mod capture;
 mod config;
 mod gadget;
 mod led;
+mod lens;
 mod libcamera;
 mod mjpeg;
 mod netmgr;
@@ -122,6 +123,10 @@ pub struct Cli {
     /// Extra rpicam-still arguments, e.g. "--hflip --vflip" or "--shutter 20000".
     #[arg(long, default_value = "")]
     pub csi_args: String,
+    /// Barrel distortion λ of a wide-angle CSI module (Camera Module 3 Wide),
+    /// overriding the built-in estimate; 0 turns the correction off.
+    #[arg(long, allow_hyphen_values = true)]
+    pub lens_lambda: Option<f32>,
     /// Do not set up the USB gadget (touch screen, keyboard) even if a UDC exists.
     #[arg(long)]
     pub no_gadget: bool,
@@ -158,6 +163,8 @@ pub struct Camera {
     /// Only one capture at a time: the device cannot be opened twice.
     lock: Arc<Mutex<()>>,
     corners: Arc<pipeline::CornerCache>,
+    /// Distortion of the CSI module's lens, when it needs undoing.
+    lens: Option<lens::Profile>,
 }
 
 impl Camera {
@@ -224,6 +231,7 @@ impl Camera {
                 rotation_degrees: p.rotation_degrees.unwrap_or(0),
                 flip_horizontal: p.flip_horizontal.unwrap_or(false),
                 flip_vertical: p.flip_vertical.unwrap_or(false),
+                lens: self.lens,
             },
             manual_corners,
             reuse_detection: p.reuse_detection.unwrap_or(false),
@@ -319,7 +327,7 @@ struct ShotParams {
     raw: Option<bool>,
     /// Reuse the corners from the previous detection instead of detecting again (default false; faster when the camera does not move).
     reuse_detection: Option<bool>,
-    /// Four [x, y] points in raw-frame pixels, any order, overriding detection.
+    /// Four [x, y] points in pixels of the capture_debug frame, any order, overriding detection.
     manual_corners: Option<Vec<[f32; 2]>>,
     /// Width of the rectified screen image; defaults to the detected size.
     output_width: Option<u32>,
@@ -372,7 +380,7 @@ struct TapParams {
     x: f32,
     /// Y in pixels of the last take_screenshot image.
     y: f32,
-    /// Interpret x/y as raw camera-frame pixels (as in capture_debug) instead of screenshot pixels.
+    /// Interpret x/y as pixels of the capture_debug frame instead of screenshot pixels.
     frame_coords: Option<bool>,
     /// How long the finger stays down, in ms (default 60; use 800+ for a long press).
     hold_ms: Option<u64>,
@@ -386,7 +394,7 @@ struct SwipeParams {
     /// End X in pixels of the last take_screenshot image.
     x2: f32,
     y2: f32,
-    /// Interpret the points as raw camera-frame pixels instead of screenshot pixels.
+    /// Interpret the points as pixels of the capture_debug frame instead of screenshot pixels.
     frame_coords: Option<bool>,
     /// Duration of the gesture in ms (default 300).
     duration_ms: Option<u64>,
@@ -572,7 +580,7 @@ impl TailvisionServer {
 
     #[tool(
         name = "capture_debug",
-        description = "Return the raw camera frame with the detected screen outline drawn on it (big dot = top-left), to check or tune the detection.",
+        description = "Return the camera frame (with a wide-angle module's lens distortion removed) with the detected screen outline drawn on it (big dot = top-left), to check or tune the detection.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     async fn capture_debug(
@@ -635,7 +643,7 @@ screen shows mostly dark content (the detector looks for a lit panel: put someth
 first, or pin the corners), the screen overflows the frame (move the camera back), a sticker or light \
 object on the bezel, reflections. Remedies: min_area_ratio (0.2-0.4) ignores small candidates such as \
 windows or icons; margin_ratio (0.01-0.03) trims a sliver of bezel; manual_corners=[[x,y],[x,y],[x,y],[x,y]] \
-in raw-frame pixels, read off capture_debug, pins the screen until the camera moves.\n\
+in pixels read off capture_debug, pins the screen until the camera moves.\n\
 \n\
 Touch. Taps go to whatever the unit's USB cable is plugged into, scaled to that device's whole display, \
 so the camera must be looking at that display. tap is finger down for hold_ms (default 60) then up; \
@@ -800,6 +808,22 @@ async fn main() -> anyhow::Result<()> {
     if let Some(info) = &csi {
         tracing::info!(model = %info.model, autofocus = info.autofocus, "CSI camera");
     }
+    let lens = csi
+        .as_ref()
+        .filter(|_| matches!(backend, capture::Backend::Csi { .. }))
+        .and_then(|i| lens::for_model(&i.model))
+        .map(|p| match cli.lens_lambda {
+            Some(l) => p.with_lambda(l),
+            None => p,
+        })
+        .filter(|p| p.lambda != 0.0);
+    if let Some(p) = &lens {
+        tracing::info!(
+            lens = p.name,
+            lambda = p.lambda,
+            "correcting lens distortion"
+        );
+    }
     tracing::info!(backend = ?backend, "camera");
     let hostname = std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
@@ -832,6 +856,7 @@ async fn main() -> anyhow::Result<()> {
             store: store_shared.clone(),
             lock: Arc::new(Mutex::new(())),
             corners: corners.clone(),
+            lens,
         },
         cli: cli.clone(),
         config: config_shared.clone(),

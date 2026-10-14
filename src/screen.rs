@@ -15,7 +15,9 @@ use imageproc::distance_transform::Norm;
 use imageproc::drawing::{draw_filled_circle_mut, draw_hollow_polygon_mut, draw_polygon_mut};
 use imageproc::edges::canny;
 use imageproc::filter::{gaussian_blur_f32, median_filter};
-use imageproc::geometric_transformations::{Border, Interpolation, Projection, warp_into};
+use imageproc::geometric_transformations::{
+    Border, Interpolation, Projection, warp_into, warp_into_with,
+};
 use imageproc::geometry::{approximate_polygon_dp, arc_length, convex_hull, min_area_rect};
 use imageproc::morphology::{close, dilate, erode};
 use imageproc::point::Point;
@@ -43,6 +45,8 @@ pub struct Options {
     pub rotation_degrees: i32,
     pub flip_horizontal: bool,
     pub flip_vertical: bool,
+    /// Lens distortion to undo; corners are then in corrected-frame pixels.
+    pub lens: Option<crate::lens::Profile>,
 }
 
 /// Longest side of the image used for detection.
@@ -877,9 +881,20 @@ fn small_copy(frame: &RgbImage) -> (RgbImage, f32) {
     )
 }
 
-/// Finds the screen in a full-resolution frame; corners are in frame coordinates.
-pub fn detect(frame: &RgbImage, min_area_ratio: f32) -> Result<Quad> {
+/// Finds the screen in a full-resolution frame; corners are in frame
+/// coordinates, those of the corrected frame when a lens is given.
+pub fn detect(
+    frame: &RgbImage,
+    min_area_ratio: f32,
+    lens: Option<&crate::lens::Profile>,
+) -> Result<Quad> {
     let (small, f) = small_copy(frame);
+    // Correcting the small copy is cheap, and its coordinates scale with the
+    // frame's because the lens mapping is proportional to the frame size.
+    let small = match lens {
+        Some(l) => l.undistort_image(&small),
+        None => small,
+    };
     if looks_blanked(&luma_of(&small)) {
         bail!("frame appears blanked (lens cap, no light, or no signal)");
     }
@@ -911,14 +926,23 @@ pub fn rectify(frame: &RgbImage, corners: Quad, opts: &Options) -> RgbImage {
         (0.0, out_h as f32 - 1.0),
     ];
     let mut out = RgbImage::new(out_w, out_h);
-    if let Some(p) = Projection::from_control_points(corners.0, dst) {
-        warp_into(
-            frame,
-            p,
-            Interpolation::Bilinear,
-            Border::Constant(Rgb([0, 0, 0])),
-            &mut out,
-        );
+    let black = Border::Constant(Rgb([0, 0, 0]));
+    match (Projection::from_control_points(corners.0, dst), &opts.lens) {
+        (Some(p), None) => warp_into(frame, p, Interpolation::Bilinear, black, &mut out),
+        // One pass from the output through the corrected frame to the camera's
+        // pixels; the corrected frame itself is never built.
+        (Some(p), Some(profile)) => {
+            let lens = profile.at(frame.width(), frame.height());
+            let inv = p.invert();
+            warp_into_with(
+                frame,
+                |x, y| lens.distort(inv * (x, y)),
+                Interpolation::Bilinear,
+                black,
+                &mut out,
+            );
+        }
+        (None, _) => {}
     }
     if opts.flip_horizontal {
         out = imageops::flip_horizontal(&out);
@@ -1148,7 +1172,7 @@ mod tests {
             let _ = img.save(format!("{dir}/scene.png"));
             DEBUG_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
             eprintln!("== synthetic {name}");
-            let q = detect(&img, 0.05).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let q = detect(&img, 0.05, None).unwrap_or_else(|e| panic!("{name}: {e}"));
             let score = iou(&q, &truth, img.width(), img.height());
             if score < 0.85 {
                 let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/");
@@ -1161,6 +1185,70 @@ mod tests {
                 q.0.map(|p| (p.0 as i32, p.1 as i32))
             );
         }
+    }
+
+    #[test]
+    fn detects_and_rectifies_through_a_wide_lens() {
+        use imageproc::geometric_transformations::warp_with;
+        let profile = crate::lens::IMX708_WIDE;
+        // A panel reaching close to the frame edges, where the bending is strongest.
+        let truth = Quad([(80.0, 90.0), (880.0, 90.0), (880.0, 600.0), (80.0, 600.0)]);
+        let ideal = synthetic_scene(truth, [120, 125, 130], [15, 15, 15], 150);
+        let lens = profile.at(ideal.width(), ideal.height());
+        // What the camera sees: each of its pixels shows the scene at the corrected position.
+        let seen = warp_with(
+            &ideal,
+            |x, y| lens.undistort((x, y)),
+            Interpolation::Bilinear,
+            Border::Constant(Rgb([0, 0, 0])),
+        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/wide-lens");
+        std::fs::create_dir_all(dir).unwrap();
+        let _ = seen.save(format!("{dir}/scene.png"));
+        DEBUG_DIR.with(|d| *d.borrow_mut() = Some(dir.to_string()));
+
+        let q = detect(&seen, 0.05, Some(&profile)).unwrap();
+        let worst =
+            q.0.iter()
+                .zip(truth.0.iter())
+                .map(|(a, b)| dist(*a, *b))
+                .fold(0.0, f32::max);
+        assert!(worst < 6.0, "corner off by {worst:.1} px: {:?}", q.0);
+
+        let opts = Options {
+            output_width: Some(400),
+            ..Default::default()
+        };
+        let want = rectify(&ideal, truth, &opts);
+        let got = rectify(
+            &seen,
+            q,
+            &Options {
+                lens: Some(profile),
+                ..opts.clone()
+            },
+        );
+        let _ = got.save(format!("{dir}/rectified.png"));
+        assert_eq!(got.dimensions(), want.dimensions());
+        let diff = got
+            .pixels()
+            .zip(want.pixels())
+            .map(|(a, b)| (a[0] as f32 - b[0] as f32).abs())
+            .sum::<f32>()
+            / (got.width() * got.height()) as f32;
+        assert!(diff < 8.0, "mean difference {diff:.1}");
+        // Uncorrected, the bent edges cost visibly more.
+        let plain = rectify(&seen, q, &opts);
+        let plain_diff = plain
+            .pixels()
+            .zip(want.pixels())
+            .map(|(a, b)| (a[0] as f32 - b[0] as f32).abs())
+            .sum::<f32>()
+            / (plain.width() * plain.height()) as f32;
+        assert!(
+            plain_diff > diff * 1.5,
+            "corrected {diff:.1}, plain {plain_diff:.1}"
+        );
     }
 
     #[test]
@@ -1178,7 +1266,7 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             DEBUG_DIR.with(|d| *d.borrow_mut() = Some(dir));
             eprintln!("== {name}");
-            let q = detect(&frame, 0.05).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let q = detect(&frame, 0.05, None).unwrap_or_else(|e| panic!("{name}: {e}"));
             let frame_area = (frame.width() * frame.height()) as f32;
             let ratio = q.area() / frame_area;
             assert!(

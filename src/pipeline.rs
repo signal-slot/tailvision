@@ -28,6 +28,8 @@ pub struct ScreenShot {
     pub frame_size: (u32, u32),
     pub output_size: (u32, u32),
     pub fourcc: String,
+    /// The lens distortion that was undone, if any.
+    pub lens: Option<&'static str>,
 }
 
 /// Last detected corners together with the frame size they belong to, and
@@ -87,7 +89,7 @@ fn resolve_corners(
     {
         return Ok((q, Source::Cached));
     }
-    let q = screen::detect(frame, req.options.min_area_ratio)?;
+    let q = screen::detect(frame, req.options.min_area_ratio, req.options.lens.as_ref())?;
     cache.set(q, size);
     Ok((q, Source::Auto))
 }
@@ -125,6 +127,7 @@ pub fn take_screen(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenSho
         frame_size: frame.dimensions(),
         output_size: out.dimensions(),
         fourcc: shot.fourcc.to_string(),
+        lens: req.options.lens.map(|l| l.name),
     })
 }
 
@@ -133,6 +136,11 @@ pub fn take_debug(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenShot
     let shot = capture::take_shot(&req.shot)?;
     let frame = screen::decode_jpeg(&shot.jpeg).context("decode camera frame")?;
     let (corners, source) = resolve_corners(&frame, req, cache)?;
+    // Corners live in the corrected frame, so that is the one to draw on.
+    let frame = match &req.options.lens {
+        Some(l) => l.undistort_image(&frame),
+        None => frame,
+    };
     let out = screen::annotate(&frame, &corners, source);
     Ok(ScreenShot {
         jpeg: screen::encode_jpeg(&out, req.jpeg_quality)?,
@@ -141,6 +149,7 @@ pub fn take_debug(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenShot
         frame_size: frame.dimensions(),
         output_size: out.dimensions(),
         fourcc: shot.fourcc.to_string(),
+        lens: req.options.lens.map(|l| l.name),
     })
 }
 
@@ -155,12 +164,15 @@ pub fn describe(s: &ScreenShot) -> String {
         ""
     };
     format!(
-        "screen {}x{} from a {}x{} {} frame; corners ({:?}) TL=({:.0},{:.0}) TR=({:.0},{:.0}) BR=({:.0},{:.0}) BL=({:.0},{:.0}); fills {:.0}% of the frame{}; {} bytes JPEG",
+        "screen {}x{} from a {}x{} {} frame{}; corners ({:?}) TL=({:.0},{:.0}) TR=({:.0},{:.0}) BR=({:.0},{:.0}) BL=({:.0},{:.0}); fills {:.0}% of the frame{}; {} bytes JPEG",
         s.output_size.0,
         s.output_size.1,
         s.frame_size.0,
         s.frame_size.1,
         s.fourcc,
+        s.lens
+            .map(|l| format!(" corrected for the {l} lens"))
+            .unwrap_or_default(),
         s.source,
         c[0].0,
         c[0].1,

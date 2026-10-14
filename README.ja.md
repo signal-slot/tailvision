@@ -176,8 +176,11 @@ mDNS で引ける。
 ## ハードウェア
 
 - Raspberry Pi Zero W(または Zero 2 W)。Pi OS Lite 32-bit、Trixie 以降。
-- Raspberry Pi Camera Module 3(オートフォーカス、10〜20cm に向く)か
+- Raspberry Pi Camera Module 3(オートフォーカス、10〜25cm に向く)か
   Module 2 / OV5647(固定焦点)。Zero 用の 22 ピンカメラケーブル。
+  Camera Module 3 Wide(水平 102°)も使える。libcamera が `imx708_wide` と
+  報告すると樽型歪みを自動で補正する。補正量はデータシートの画角からの
+  推定値で、実機では未測定。`--lens-lambda` で上書きでき、0 で補正しない。
 - **USB** ポートから対象機への micro-B → USB-A ケーブル。この 1 本で給電、
   タッチ、キーボードが通る。対象機の電源を切っても本機を
   生かしておきたいなら **PWR IN** に別電源を入れ、対象機側ケーブルの VBUS に
@@ -261,7 +264,7 @@ ext4 の配置が変わるので差分書き込みでも数百 MB になり、�
 
 ```
 tailvision [--bind [::]:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
-           [--csi-args "--hflip"] [--no-gadget] [--device /dev/video0]
+           [--csi-args "--hflip"] [--lens-lambda -0.0365] [--no-gadget] [--device /dev/video0]
            [--width W --height H] [--skip-frames 10] [--quality 85]
            [--frame-timeout 5] [--state-dir /var/lib/tailvision]
            [--wifi-iface wlan0] [--hotspot-after 60] [--hotspot-retry 600]
@@ -283,7 +286,8 @@ tailvision [--bind [::]:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
 ## 液晶を撮るときのコツ
 
 - 画角: 撮影結果に「画面がフレームの何 % か」が付く。Camera Module 3(水平
-  66°)なら 7 インチで約 12cm、5 インチで約 9cm で画面いっぱい。3〜7 割
+  66°)なら 10 インチで約 18cm、7 インチで約 12cm、5 インチで約 9cm で
+  画面いっぱい。Wide(水平 102°)なら 10 インチで約 10cm。3〜7 割
   写っていれば十分で、残りは検出が切り出す。
 - フォーカス・露出・WB: 毎回の自動と格闘せず、設置時に 1 回キャリブレーション
   して固定する。シャッターをバックライト PWM の周期より長く(10ms 以上)

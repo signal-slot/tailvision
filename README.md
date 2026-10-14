@@ -213,8 +213,12 @@ or in `.mcp.json`:
 ## Hardware
 
 - Raspberry Pi Zero W (or Zero 2 W). Pi OS Lite 32-bit, Trixie or later.
-- Raspberry Pi Camera Module 3 (autofocus, good for 10–20 cm) or Module 2 /
+- Raspberry Pi Camera Module 3 (autofocus, good for 10–25 cm) or Module 2 /
   OV5647 (fixed focus), with the 22-pin Zero camera ribbon cable.
+  Camera Module 3 Wide (102° horizontal) works too: when libcamera reports
+  `imx708_wide` the barrel distortion is undone automatically. The amount
+  is estimated from the datasheet's field of view, not yet measured on a
+  real module; `--lens-lambda` overrides it and 0 turns it off.
 - A micro-B to USB-A cable from the port marked **USB** to the device under
   test. That one cable carries power, touch and keyboard.
   To keep the unit alive while the target is power-cycled, feed **PWR IN**
@@ -302,7 +306,7 @@ delta flash moves hundreds of megabytes).
 
 ```
 tailvision [--bind [::]:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
-           [--csi-args "--hflip"] [--no-gadget] [--device /dev/video0]
+           [--csi-args "--hflip"] [--lens-lambda -0.0365] [--no-gadget] [--device /dev/video0]
            [--width W --height H] [--skip-frames 10] [--quality 85]
            [--frame-timeout 5] [--state-dir /var/lib/tailvision]
            [--wifi-iface wlan0] [--hotspot-after 60] [--hotspot-retry 600]
@@ -324,9 +328,10 @@ tailvision [--bind [::]:80] [--camera auto|csi|uvc] [--csi-settle-ms 1500]
 ## Pointing a camera at an LCD
 
 - Framing: every screenshot reports how much of the frame the screen fills.
-  With the Camera Module 3 (66° horizontal) a 7-inch panel fills the frame at
-  about 12 cm, a 5-inch one at about 9 cm; 30-70% fill is plenty, the
-  detector crops the rest.
+  With the Camera Module 3 (66° horizontal) a 10-inch panel fills the frame
+  at about 18 cm, a 7-inch one at about 12 cm, a 5-inch one at about 9 cm;
+  with the Wide (102°) a 10-inch panel fills it at about 10 cm. 30-70% fill
+  is plenty, the detector crops the rest.
 - Focus, exposure, white balance: calibrate once (see above) rather than
   fighting the automatics on every shot. A shutter time longer than the
   backlight's PWM period (10 ms or more) also removes the flicker bands.
