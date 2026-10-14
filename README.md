@@ -107,7 +107,9 @@ Port 80.
    slow cloud-init run); later boots take about a minute.
 2. On its first start the unit names itself **`tailvision-xxxx`**, `xxxx`
    being the last four hex digits of its Wi-Fi MAC (print them on the label),
-   so several units have distinct mDNS, hotspot and Tailscale names. About a
+   so several units have distinct mDNS, hotspot and Tailscale names. The name
+   follows the board: move the card to another Zero W and it takes that
+   board's digits at the next start. A name set on the setup page stays. About a
    minute after power-on it raises its own Wi-Fi network
    **`tailvision-xxxx-setup`** (WPA2, password **`tailvision-setup`** unless
    the unit shipped with its own, see below). The LED blinks fast while the

@@ -242,6 +242,22 @@ impl Gadget {
         let mut bound = fs::read_to_string(g.join("UDC"))
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
+        // The serial number is the hostname, which follows the board; the host
+        // only reads it again when the gadget re-enumerates.
+        let serial_file = g.join("strings/0x409/serialnumber");
+        if fs::read_to_string(&serial_file)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            != Some(serial)
+        {
+            if bound {
+                unbind(&g).context("unbind gadget to update the serial number")?;
+                bound = false;
+            }
+            write(&serial_file, serial)?;
+            tracing::info!(serial, "USB serial number updated");
+        }
         // A gadget left by an earlier run keeps its old descriptors: refresh
         // any that this build changed. f_hid refuses the write (EBUSY) while
         // the function is part of a configuration, so unbind, unlink it from

@@ -825,6 +825,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     tracing::info!(backend = ?backend, "camera");
+    supervisor::ensure_unique_hostname(&cli.wifi_iface).await;
     let hostname = std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| PRODUCT_NAME.into());

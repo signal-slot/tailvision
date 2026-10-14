@@ -91,24 +91,51 @@ pub fn unit_suffix(wifi_iface: &str) -> Option<String> {
     (digits.len() == 12).then(|| digits[8..].to_string())
 }
 
-/// A unit fresh from the image is called just `tailvision`; give it the
-/// per-unit name `tailvision-xxxx` once, so its mDNS name, its Tailscale node
-/// name and its hotspot (`<hostname>-setup`) are all unique among several
-/// units. A hostname the user chose is left alone.
-pub async fn ensure_unique_hostname(app: &App) {
+/// Whether `host` is a name the unit gave itself: the image's `tailvision`
+/// or `tailvision-xxxx` with four hex digits. Anything else was chosen.
+fn is_automatic_name(host: &str) -> bool {
+    match host.strip_prefix(crate::PRODUCT_NAME) {
+        Some("") => true,
+        Some(rest) => rest.strip_prefix('-').is_some_and(|sfx| {
+            sfx.len() == 4
+                && sfx
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        }),
+        None => false,
+    }
+}
+
+/// Gives the unit its per-unit name `tailvision-xxxx` from the Wi-Fi MAC of
+/// the board it runs on, so its mDNS name, its Tailscale node name and its
+/// hotspot (`<hostname>-setup`) are all unique among several units. Runs at
+/// every start: a card moved to another board takes that board's name. A
+/// hostname the user chose is left alone. Runs before the USB gadget is set
+/// up, whose serial number is the hostname.
+pub async fn ensure_unique_hostname(wifi_iface: &str) {
     let Ok(host) = netmgr::hostname().await else {
         return;
     };
-    if host != crate::PRODUCT_NAME {
+    if !is_automatic_name(&host) {
         return;
     }
-    let Some(suffix) = unit_suffix(&app.cli.wifi_iface) else {
+    let Some(suffix) = unit_suffix(wifi_iface) else {
         return;
     };
-    let name = format!("{host}-{suffix}");
-    match netmgr::set_hostname(&name).await {
-        Ok(()) => tracing::info!(hostname = name, "factory hostname made unique"),
-        Err(e) => tracing::warn!(error = %e, "could not set the per-unit hostname"),
+    let name = format!("{}-{suffix}", crate::PRODUCT_NAME);
+    if name == host {
+        return;
+    }
+    if let Err(e) = netmgr::set_hostname(&name).await {
+        tracing::warn!(error = %e, "could not set the per-unit hostname");
+        return;
+    }
+    tracing::info!(from = host, to = name, "hostname follows the board");
+    // A node that is already logged in keeps its old name otherwise.
+    if host != crate::PRODUCT_NAME
+        && let Err(e) = tailscale::set_hostname(&name).await
+    {
+        tracing::warn!(error = %e, "could not rename the Tailscale node");
     }
 }
 
@@ -336,7 +363,6 @@ pub async fn run(app: App) {
     let tick = Duration::from_secs(10);
     let mut last_status = String::new();
     netmgr::set_country(app.wifi_country.as_deref()).await;
-    ensure_unique_hostname(&app).await;
     let offline_grace = Duration::from_secs(app.cli.hotspot_after);
     let retry_every = Duration::from_secs(app.cli.hotspot_retry);
     let mut last_online = Instant::now();
@@ -451,5 +477,22 @@ pub async fn run(app: App) {
             raise_hotspot(&app).await;
             app.net.switching.store(false, Ordering::SeqCst);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_names() {
+        assert!(is_automatic_name("tailvision"));
+        assert!(is_automatic_name("tailvision-910f"));
+        assert!(is_automatic_name("tailvision-0a3c"));
+        assert!(!is_automatic_name("tailvision-1"));
+        assert!(!is_automatic_name("tailvision-910F"));
+        assert!(!is_automatic_name("tailvision-desk"));
+        assert!(!is_automatic_name("tailvision-910f2"));
+        assert!(!is_automatic_name("bench-cam"));
     }
 }
