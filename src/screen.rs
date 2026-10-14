@@ -45,8 +45,6 @@ pub struct Options {
     pub rotation_degrees: i32,
     pub flip_horizontal: bool,
     pub flip_vertical: bool,
-    /// Lens distortion to undo; corners are then in corrected-frame pixels.
-    pub lens: Option<crate::lens::Profile>,
 }
 
 /// Longest side of the image used for detection.
@@ -886,13 +884,13 @@ fn small_copy(frame: &RgbImage) -> (RgbImage, f32) {
 pub fn detect(
     frame: &RgbImage,
     min_area_ratio: f32,
-    lens: Option<&crate::lens::Profile>,
+    lens: Option<&crate::lens::Lens>,
 ) -> Result<Quad> {
     let (small, f) = small_copy(frame);
     // Correcting the small copy is cheap, and its coordinates scale with the
     // frame's because the lens mapping is proportional to the frame size.
     let small = match lens {
-        Some(l) => l.undistort_image(&small),
+        Some(l) => l.scaled(f).undistort_image(&small),
         None => small,
     };
     if looks_blanked(&luma_of(&small)) {
@@ -903,8 +901,14 @@ pub fn detect(
     Ok(q.scaled(1.0 / f))
 }
 
-/// Perspective-corrects the quad out of the frame and applies the output options.
-pub fn rectify(frame: &RgbImage, corners: Quad, opts: &Options) -> RgbImage {
+/// Perspective-corrects the quad out of the frame and applies the output
+/// options. With a lens, the corners are in corrected-frame pixels.
+pub fn rectify(
+    frame: &RgbImage,
+    corners: Quad,
+    opts: &Options,
+    lens: Option<&crate::lens::Lens>,
+) -> RgbImage {
     let corners = corners.with_margin(opts.margin_ratio);
     let (nat_w, nat_h) = corners.output_size();
     let (out_w, out_h) = match (opts.output_width, opts.output_height) {
@@ -927,12 +931,11 @@ pub fn rectify(frame: &RgbImage, corners: Quad, opts: &Options) -> RgbImage {
     ];
     let mut out = RgbImage::new(out_w, out_h);
     let black = Border::Constant(Rgb([0, 0, 0]));
-    match (Projection::from_control_points(corners.0, dst), &opts.lens) {
+    match (Projection::from_control_points(corners.0, dst), lens) {
         (Some(p), None) => warp_into(frame, p, Interpolation::Bilinear, black, &mut out),
         // One pass from the output through the corrected frame to the camera's
         // pixels; the corrected frame itself is never built.
-        (Some(p), Some(profile)) => {
-            let lens = profile.at(frame.width(), frame.height());
+        (Some(p), Some(lens)) => {
             let inv = p.invert();
             warp_into_with(
                 frame,
@@ -1038,7 +1041,7 @@ mod tests {
             *p = Rgb([x as u8, y as u8, 7]);
         }
         let q = Quad([(10.0, 10.0), (49.0, 10.0), (49.0, 29.0), (10.0, 29.0)]);
-        let out = rectify(&img, q, &Options::default());
+        let out = rectify(&img, q, &Options::default(), None);
         assert_eq!(out.dimensions(), (39, 19));
         assert_eq!(out.get_pixel(0, 0)[0], 10);
         assert_eq!(out.get_pixel(38, 18)[1], 29);
@@ -1049,6 +1052,7 @@ mod tests {
                 rotation_degrees: 90,
                 ..Default::default()
             },
+            None,
         );
         assert_eq!(rotated.dimensions(), (19, 39));
         let forced = rectify(
@@ -1058,6 +1062,7 @@ mod tests {
                 output_width: Some(78),
                 ..Default::default()
             },
+            None,
         );
         assert_eq!(forced.dimensions(), (78, 38));
     }
@@ -1194,7 +1199,7 @@ mod tests {
         // A panel reaching close to the frame edges, where the bending is strongest.
         let truth = Quad([(80.0, 90.0), (880.0, 90.0), (880.0, 600.0), (80.0, 600.0)]);
         let ideal = synthetic_scene(truth, [120, 125, 130], [15, 15, 15], 150);
-        let lens = profile.at(ideal.width(), ideal.height());
+        let lens = profile.at(ideal.width(), ideal.height(), None);
         // What the camera sees: each of its pixels shows the scene at the corrected position.
         let seen = warp_with(
             &ideal,
@@ -1207,7 +1212,7 @@ mod tests {
         let _ = seen.save(format!("{dir}/scene.png"));
         DEBUG_DIR.with(|d| *d.borrow_mut() = Some(dir.to_string()));
 
-        let q = detect(&seen, 0.05, Some(&profile)).unwrap();
+        let q = detect(&seen, 0.05, Some(&lens)).unwrap();
         let worst =
             q.0.iter()
                 .zip(truth.0.iter())
@@ -1219,15 +1224,8 @@ mod tests {
             output_width: Some(400),
             ..Default::default()
         };
-        let want = rectify(&ideal, truth, &opts);
-        let got = rectify(
-            &seen,
-            q,
-            &Options {
-                lens: Some(profile),
-                ..opts.clone()
-            },
-        );
+        let want = rectify(&ideal, truth, &opts, None);
+        let got = rectify(&seen, q, &opts, Some(&lens));
         let _ = got.save(format!("{dir}/rectified.png"));
         assert_eq!(got.dimensions(), want.dimensions());
         let diff = got
@@ -1238,7 +1236,7 @@ mod tests {
             / (got.width() * got.height()) as f32;
         assert!(diff < 8.0, "mean difference {diff:.1}");
         // Uncorrected, the bent edges cost visibly more.
-        let plain = rectify(&seen, q, &opts);
+        let plain = rectify(&seen, q, &opts, None);
         let plain_diff = plain
             .pixels()
             .zip(want.pixels())
@@ -1281,6 +1279,7 @@ mod tests {
                     output_width: Some(640),
                     ..Default::default()
                 },
+                None,
             );
             let dbg = annotate(&frame, &q, Source::Auto);
             let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/");

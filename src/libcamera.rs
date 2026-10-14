@@ -131,30 +131,70 @@ pub fn describe() -> String {
     }
 }
 
-/// Grabs one JPEG. Returns (jpeg, width, height).
-pub fn take_jpeg(req: &CsiRequest) -> Result<(Vec<u8>, u32, u32)> {
-    let (jpeg, w, h, _) = capture(req, false)?;
-    Ok((jpeg, w, h))
+/// The part of the sensor's pixel array a frame shows, as libcamera reports
+/// it (`ScalerCrop`). Small output sizes can come from a cropped sensor mode:
+/// on the IMX708, 1536x864 shows only the middle 3072x1728.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScalerCrop {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ScalerCrop {
+    /// Parses rpicam-still's `"(768, 432)/3072x1728"`.
+    fn parse(s: &str) -> Option<Self> {
+        let (pos, size) = s.trim().split_once('/')?;
+        let (x, y) = pos
+            .trim()
+            .strip_prefix('(')?
+            .strip_suffix(')')?
+            .split_once(',')?;
+        let (w, h) = size.trim().split_once('x')?;
+        Some(Self {
+            x: x.trim().parse().ok()?,
+            y: y.trim().parse().ok()?,
+            width: w.trim().parse().ok()?,
+            height: h.trim().parse().ok()?,
+        })
+        .filter(|c| c.width > 0 && c.height > 0)
+    }
+}
+
+/// One frame from rpicam-still.
+pub struct Frame {
+    pub jpeg: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// The settings the camera used, from its metadata.
+    pub lock: Option<CameraLock>,
+    pub crop: Option<ScalerCrop>,
+}
+
+/// Grabs one JPEG.
+pub fn take_jpeg(req: &CsiRequest) -> Result<Frame> {
+    capture(req)
 }
 
 /// Grabs one JPEG with everything on automatic (and an autofocus cycle when
 /// the module has one) and returns the settings the camera converged on, so
 /// they can be locked for all later captures.
-pub fn calibrate(req: &CsiRequest) -> Result<(CameraLock, Vec<u8>)> {
+pub fn calibrate(req: &CsiRequest) -> Result<(CameraLock, Frame)> {
     let auto = CsiRequest {
         lock: None,
         settle: req.settle.max(Duration::from_millis(1500)),
         ..req.clone()
     };
-    let (jpeg, _, _, lock) = capture(&auto, true)?;
-    let lock = lock.ok_or_else(|| anyhow!("rpicam-still produced no metadata"))?;
-    Ok((lock, jpeg))
+    let frame = capture(&auto)?;
+    let lock = frame
+        .lock
+        .clone()
+        .ok_or_else(|| anyhow!("rpicam-still produced no metadata"))?;
+    Ok((lock, frame))
 }
 
-fn capture(
-    req: &CsiRequest,
-    want_metadata: bool,
-) -> Result<(Vec<u8>, u32, u32, Option<CameraLock>)> {
+fn capture(req: &CsiRequest) -> Result<Frame> {
     let mut cmd = Command::new("rpicam-still");
     cmd.args(["--nopreview", "--encoding", "jpg", "--output", "-"]);
     // Locked settings need no convergence time; a short run still lets the
@@ -179,16 +219,15 @@ fn capture(
             }
         }
     }
-    let meta_path = want_metadata
-        .then(|| std::env::temp_dir().join(format!("tailvision-meta-{}.json", std::process::id())));
-    if let Some(p) = &meta_path {
-        cmd.args([
-            "--metadata",
-            &p.to_string_lossy(),
-            "--metadata-format",
-            "json",
-        ]);
-    }
+    // Always: the crop tells which part of the sensor the frame shows.
+    let meta_path =
+        std::env::temp_dir().join(format!("tailvision-meta-{}.json", std::process::id()));
+    cmd.args([
+        "--metadata",
+        &meta_path.to_string_lossy(),
+        "--metadata-format",
+        "json",
+    ]);
     cmd.args(&req.extra_args);
     let out = cmd.output().context("run rpicam-still")?;
     if !out.status.success() {
@@ -209,28 +248,41 @@ fn capture(
         ));
     }
     let (w, h) = jpeg_size(&jpeg).unwrap_or((req.width.unwrap_or(0), req.height.unwrap_or(0)));
-    let lock = meta_path.and_then(|p| {
-        let text = std::fs::read_to_string(&p).ok();
-        let _ = std::fs::remove_file(&p);
-        text.and_then(|t| parse_metadata(&t))
-    });
-    Ok((jpeg, w, h, lock))
+    let meta = std::fs::read_to_string(&meta_path).ok();
+    let _ = std::fs::remove_file(&meta_path);
+    let (lock, crop) = meta
+        .as_deref()
+        .and_then(parse_metadata)
+        .map_or((None, None), |(l, c)| (Some(l), c));
+    Ok(Frame {
+        jpeg,
+        width: w,
+        height: h,
+        lock,
+        crop,
+    })
 }
 
-/// Pulls the converged settings out of rpicam-still's JSON metadata.
-fn parse_metadata(text: &str) -> Option<CameraLock> {
+/// Pulls the converged settings and the sensor crop out of rpicam-still's
+/// JSON metadata.
+fn parse_metadata(text: &str) -> Option<(CameraLock, Option<ScalerCrop>)> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let crop = v
+        .get("ScalerCrop")
+        .and_then(|x| x.as_str())
+        .and_then(ScalerCrop::parse);
     let num = |k: &str| v.get(k).and_then(|x| x.as_f64());
     let awb = v
         .get("ColourGains")
         .and_then(|x| x.as_array())
         .and_then(|a| Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32)));
-    Some(CameraLock {
+    let lock = CameraLock {
         lens_position: num("LensPosition").map(|x| x as f32),
         shutter_us: num("ExposureTime").map(|x| x.round() as u32),
         gain: num("AnalogueGain").map(|x| x as f32),
         awb_gains: awb,
-    })
+    };
+    Some((lock, crop))
 }
 
 /// Reads the frame size from the SOF marker without decoding.
@@ -270,10 +322,20 @@ mod tests {
 
     #[test]
     fn parses_metadata_and_builds_args() {
-        let lock = parse_metadata(
-            r#"{"ExposureTime": 19988, "AnalogueGain": 2.5, "ColourGains": [1.81, 1.62], "LensPosition": 4.75, "ColourTemperature": 4800}"#,
+        let (lock, crop) = parse_metadata(
+            r#"{"ExposureTime": 19988, "AnalogueGain": 2.5, "ColourGains": [1.81, 1.62], "LensPosition": 4.75, "ColourTemperature": 4800, "ScalerCrop": "(768, 432)/3072x1728"}"#,
         )
         .unwrap();
+        assert_eq!(
+            crop,
+            Some(ScalerCrop {
+                x: 768,
+                y: 432,
+                width: 3072,
+                height: 1728
+            })
+        );
+        assert_eq!(ScalerCrop::parse("garbage"), None);
         assert_eq!(lock.shutter_us, Some(19988));
         assert_eq!(lock.lens_position, Some(4.75));
         assert_eq!(lock.awb_gains, Some((1.81, 1.62)));

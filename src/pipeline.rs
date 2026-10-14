@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result, bail};
 
 use crate::capture::{self, ShotRequest};
+use crate::lens::Lens;
 use crate::screen::{self, Options, Quad, Source};
 use crate::touch::ScreenGeometry;
 
@@ -19,6 +20,8 @@ pub struct ScreenRequest {
     pub reuse_detection: bool,
     /// JPEG quality of the rectified output.
     pub jpeg_quality: u8,
+    /// The camera's lens, when its distortion needs undoing.
+    pub lens: Option<crate::lens::Profile>,
 }
 
 pub struct ScreenShot {
@@ -65,6 +68,7 @@ impl CornerCache {
 fn resolve_corners(
     frame: &image::RgbImage,
     req: &ScreenRequest,
+    lens: Option<&Lens>,
     cache: &CornerCache,
 ) -> Result<(Quad, Source)> {
     let size = frame.dimensions();
@@ -89,9 +93,15 @@ fn resolve_corners(
     {
         return Ok((q, Source::Cached));
     }
-    let q = screen::detect(frame, req.options.min_area_ratio, req.options.lens.as_ref())?;
+    let q = screen::detect(frame, req.options.min_area_ratio, lens)?;
     cache.set(q, size);
     Ok((q, Source::Auto))
+}
+
+/// The lens mapping for this frame: its size, and the part of the sensor it shows.
+fn frame_lens(req: &ScreenRequest, shot: &capture::Shot, frame: &image::RgbImage) -> Option<Lens> {
+    req.lens
+        .map(|p| p.at(frame.width(), frame.height(), shot.crop))
 }
 
 /// Blocking: grabs a frame and returns the rectified screen.
@@ -101,9 +111,10 @@ pub fn take_screen(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenSho
     let t_capture = t0.elapsed();
     let frame = screen::decode_jpeg(&shot.jpeg).context("decode camera frame")?;
     let t_decode = t0.elapsed() - t_capture;
-    let (corners, source) = resolve_corners(&frame, req, cache)?;
+    let lens = frame_lens(req, &shot, &frame);
+    let (corners, source) = resolve_corners(&frame, req, lens.as_ref(), cache)?;
     let t_detect = t0.elapsed() - t_capture - t_decode;
-    let out = screen::rectify(&frame, corners, &req.options);
+    let out = screen::rectify(&frame, corners, &req.options, lens.as_ref());
     cache.set_geometry(ScreenGeometry::new(
         corners,
         frame.dimensions(),
@@ -127,7 +138,7 @@ pub fn take_screen(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenSho
         frame_size: frame.dimensions(),
         output_size: out.dimensions(),
         fourcc: shot.fourcc.to_string(),
-        lens: req.options.lens.map(|l| l.name),
+        lens: req.lens.map(|l| l.name),
     })
 }
 
@@ -135,9 +146,10 @@ pub fn take_screen(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenSho
 pub fn take_debug(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenShot> {
     let shot = capture::take_shot(&req.shot)?;
     let frame = screen::decode_jpeg(&shot.jpeg).context("decode camera frame")?;
-    let (corners, source) = resolve_corners(&frame, req, cache)?;
+    let lens = frame_lens(req, &shot, &frame);
+    let (corners, source) = resolve_corners(&frame, req, lens.as_ref(), cache)?;
     // Corners live in the corrected frame, so that is the one to draw on.
-    let frame = match &req.options.lens {
+    let frame = match &lens {
         Some(l) => l.undistort_image(&frame),
         None => frame,
     };
@@ -149,7 +161,7 @@ pub fn take_debug(req: &ScreenRequest, cache: &CornerCache) -> Result<ScreenShot
         frame_size: frame.dimensions(),
         output_size: out.dimensions(),
         fourcc: shot.fourcc.to_string(),
-        lens: req.options.lens.map(|l| l.name),
+        lens: req.lens.map(|l| l.name),
     })
 }
 

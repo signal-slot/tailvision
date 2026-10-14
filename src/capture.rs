@@ -55,6 +55,8 @@ pub struct Shot {
     pub height: u32,
     pub fourcc: FourCC,
     pub frames_skipped: u32,
+    /// The part of the sensor the frame shows (CSI modules only).
+    pub crop: Option<crate::libcamera::ScalerCrop>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,13 +128,14 @@ pub fn take_shot(req: &ShotRequest) -> Result<Shot> {
             lock: lock.clone(),
             extra_args: extra_args.clone(),
         };
-        let (jpeg, width, height) = crate::libcamera::take_jpeg(&csi)?;
+        let f = crate::libcamera::take_jpeg(&csi)?;
         return Ok(Shot {
-            jpeg,
-            width,
-            height,
+            jpeg: f.jpeg,
+            width: f.width,
+            height: f.height,
             fourcc: CSI,
             frames_skipped: 0,
+            crop: f.crop,
         });
     }
     let dev = Device::open(&req.device).with_context(|| format!("open {}", req.device))?;
@@ -199,6 +202,7 @@ pub fn take_shot(req: &ShotRequest) -> Result<Shot> {
         height: actual.height,
         fourcc: actual_fourcc,
         frames_skipped,
+        crop: None,
     })
 }
 

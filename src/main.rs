@@ -231,11 +231,11 @@ impl Camera {
                 rotation_degrees: p.rotation_degrees.unwrap_or(0),
                 flip_horizontal: p.flip_horizontal.unwrap_or(false),
                 flip_vertical: p.flip_vertical.unwrap_or(false),
-                lens: self.lens,
             },
             manual_corners,
             reuse_detection: p.reuse_detection.unwrap_or(false),
             jpeg_quality: p.quality.unwrap_or(self.cli.quality),
+            lens: self.lens,
         })
     }
 
@@ -281,14 +281,14 @@ impl Camera {
             lock: None,
             extra_args,
         };
-        let (lock, jpeg) = tokio::task::spawn_blocking(move || libcamera::calibrate(&req))
+        let (lock, frame) = tokio::task::spawn_blocking(move || libcamera::calibrate(&req))
             .await
             .context("calibration task")??;
         let mut cfg = self.config.read().await.clone();
         cfg.camera_lock = Some(lock.clone());
         self.store.save(&cfg)?;
         *self.config.write().await = cfg;
-        Ok((lock, jpeg))
+        Ok((lock, frame.jpeg))
     }
 
     pub async fn unlock(&self) -> anyhow::Result<()> {
