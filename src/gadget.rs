@@ -76,6 +76,12 @@ pub struct Gadget {
     lock: Mutex<()>,
 }
 
+/// Detaches the gadget from the UDC. An empty write never reaches configfs,
+/// so this sends a bare newline, as `echo "" > UDC` does.
+fn unbind(g: &Path) -> Result<()> {
+    write(g.join("UDC"), "\n")
+}
+
 fn write(path: impl AsRef<Path>, value: impl AsRef<[u8]>) -> Result<()> {
     fs::write(path.as_ref(), value.as_ref())
         .with_context(|| format!("write {}", path.as_ref().display()))
@@ -249,7 +255,7 @@ impl Gadget {
                 continue;
             }
             if bound {
-                write(g.join("UDC"), "").context("unbind gadget to update descriptors")?;
+                unbind(&g).context("unbind gadget to update descriptors")?;
                 bound = false;
             }
             let link = g.join("configs/c.1").join(name);
