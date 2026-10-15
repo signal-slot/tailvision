@@ -66,13 +66,14 @@ SD_OUT = 2.0                                  # how far the seated card protrude
 
 # camera module 3: u across the 25 mm width, v up from the connector edge
 CAM_W, CAM_H = 25.0, 23.862
-CAM_HOLES_U, CAM_HOLES_V = (2.0, 23.0), (2.0, 14.5)
-CAM_LENS_U, CAM_LENS_V = 12.5, 14.4
+# the drawing measures the holes (2.0, 14.5) and the lens (14.4) from the edge
+# away from the connector; v here counts from the connector edge
+CAM_HOLES_U, CAM_HOLES_V = (2.0, 23.0), (CAM_H - 14.5, CAM_H - 2.0)
+CAM_LENS_U, CAM_LENS_V = 12.5, CAM_H - 14.4
 CAM_HOUSING = 10.8          # square sensor housing around the lens
 CAM_FRONT = 7.5             # board front -> lens tip (6.98 + adhesive layer)
 CAM_HOUSING_H = 3.9         # board front -> housing front
-CAM_BOTTOM_X = 57.0         # where the connector edge (v = 0) sits, toward the Pi's CSI end
-CAM_CY = 15.0               # camera centre line = Pi centre line
+LENS_X = LENS_Y = None      # where the lens window sits; None = the middle of the lid
 CAM_BOSS_D, CAM_BOSS_H = 4.2, 1.2
 CAM_PEG_D, CAM_PEG_H = 1.4, 2.0           # into the camera's 2.2 mm holes; 1.9 printed too fat
 CLIP_T, CLIP_W, CLIP_BARB, CLIP_CLR = 1.0, 6.0, 0.6, 0.4    # clips over the board's long edges; 0.15 printed too tight
@@ -88,8 +89,10 @@ Z_PI = STANDOFF
 Z_PT = Z_PI + PI_T
 Z_LID = Z_PT + H_IN
 Z_TOP = Z_LID + LID_T
-LENS_X = CAM_BOTTOM_X - CAM_LENS_V
-LENS_Y = CAM_CY + (CAM_LENS_U - CAM_W / 2)
+LENS_X = OUT_X0 + OUT_L / 2 if LENS_X is None else LENS_X
+LENS_Y = OUT_Y0 + OUT_W / 2 if LENS_Y is None else LENS_Y
+CAM_BOTTOM_X = LENS_X + CAM_LENS_V                 # the connector edge (v = 0), toward the Pi's CSI end
+CAM_CY = LENS_Y - (CAM_LENS_U - CAM_W / 2)         # the camera's centre line
 
 
 def cam_xy(u, v):
@@ -210,9 +213,6 @@ def mock_camera():
     cam += cyl(LENS_X, LENS_Y, z_front, 5.75, CAM_FRONT)
     cx0, cy0 = cam_xy(CAM_W / 2 + 19.61 / 2, 5.71)
     cam += box(cx0, cy0, z_front - 1.12 - 2.75, 5.71, 19.61, 2.75)  # back FPC connector
-    for u in CAM_HOLES_U:                       # the connector body stops short of the holes
-        x, y = cam_xy(u, CAM_HOLES_V[0])
-        cam -= cyl(x, y, z_front - 5, 2.2, 6)
     return cam
 
 

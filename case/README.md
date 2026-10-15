@@ -54,4 +54,4 @@ python3 case.py                      # stl/*.stl, preview.png
 python3 case.py --copy-to ~/shared   # and a fresh copy of each STL there
 ```
 
-Everything is a named constant at the top of `case.py`: wall thickness, clearance, where the camera sits (`CAM_BOTTOM_X`), the port opening. The checks print a line per overlap when a change collides with the Pi or the camera.
+Everything is a named constant at the top of `case.py`: wall thickness, clearance, where the lens window sits (`LENS_X`, `LENS_Y`; the middle of the lid by default), the port opening. The checks print a line per overlap when a change collides with the Pi or the camera.
