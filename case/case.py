@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Case for a tailvision unit: Raspberry Pi Zero W + Camera Module 3.
 
+Two variants from the same model: a bare Zero W / Zero 2 W, and one with the
+2x20 pin header soldered on (Zero WH): a taller body so the solder tails
+clear the floor and the header clears the camera and the lid's lip.
+
 Two printed parts, no supports, no screws, no glue:
   body   - holds the Pi on four pegs rising from the floor, an opening for
            the USB port (the one that powers the unit), a slot for the
@@ -14,7 +18,9 @@ Dimensions come from the official drawings:
   Raspberry Pi Zero mechanical drawing (RP-008365)
   Camera Module 3 standard mechanical drawing (RP-008153)
 
-Run:  python3 case.py           writes stl/*.stl and preview.png
+Run:  python3 case.py           writes stl/{body,lid}.stl, preview.png and the
+                                header variant stl/{body,lid}-header.stl,
+                                preview-header.png
       python3 case.py --copy-to ~/shared   also copies the STLs there (a
       fresh file each time, so a synced folder notices the change)
 Needs: manifold3d, numpy (pillow for the preview).
@@ -79,20 +85,46 @@ CAM_PEG_D, CAM_PEG_H = 1.4, 2.0           # into the camera's 2.2 mm holes; 1.9 
 CLIP_T, CLIP_W, CLIP_BARB, CLIP_CLR = 1.0, 6.0, 0.6, 0.4    # clips over the board's long edges; 0.15 printed too tight
 WINDOW_CLR = 0.4
 
+# 2x20 pin header (Zero WH, or soldered on): the variant built with header=True
+HDR_X, HDR_Y = 32.5, 26.5   # centre of the header, from the Zero drawing
+HDR_L, HDR_W = 50.8, 5.08
+HDR_TOP = 8.5               # Pi top -> pin tips (2.5 plastic + 6.0 pin)
+HDR_TAIL = 2.0              # Pi underside -> solder tails, blobs included
+HDR_STANDOFF = 2.4          # tails 0.4 off the floor
+HDR_H_IN = 12.8             # the camera clip on the header side hangs over the
+                            # header: its hook clears the pin tips by 0.3
+HDR_LENS_DY = -0.8          # camera toward the USB side, so its back FPC
+                            # connector (below the header tips) clears the header
+HEADER = False
+
 # ---- derived ---------------------------------------------------------------
-IN_X0, IN_Y0 = -CLR, -PORT_CLR
-IN_L, IN_W = PI_L + 2 * CLR + POCKET, PI_W + CLR + PORT_CLR
-IN_R = PI_R + 0.2
-OUT_X0, OUT_Y0 = IN_X0 - WALL, IN_Y0 - WALL
-OUT_L, OUT_W, OUT_R = IN_L + 2 * WALL, IN_W + 2 * WALL, IN_R + WALL
-Z_PI = STANDOFF
-Z_PT = Z_PI + PI_T
-Z_LID = Z_PT + H_IN
-Z_TOP = Z_LID + LID_T
-LENS_X = OUT_X0 + OUT_L / 2 if LENS_X is None else LENS_X
-LENS_Y = OUT_Y0 + OUT_W / 2 if LENS_Y is None else LENS_Y
-CAM_BOTTOM_X = LENS_X + CAM_LENS_V                 # the connector edge (v = 0), toward the Pi's CSI end
-CAM_CY = LENS_Y - (CAM_LENS_U - CAM_W / 2)         # the camera's centre line
+LENS_X_SET, LENS_Y_SET = LENS_X, LENS_Y
+
+
+def derive(header):
+    """Set the variant's heights and everything computed from the parameters."""
+    global HEADER, IN_X0, IN_Y0, IN_L, IN_W, IN_R, OUT_X0, OUT_Y0, OUT_L, OUT_W, OUT_R
+    global Z_PI, Z_PT, Z_LID, Z_TOP, LENS_X, LENS_Y, CAM_BOTTOM_X, CAM_CY
+    HEADER = header
+    standoff, h_in = (HDR_STANDOFF, HDR_H_IN) if header else (STANDOFF, H_IN)
+    IN_X0, IN_Y0 = -CLR, -PORT_CLR
+    IN_L, IN_W = PI_L + 2 * CLR + POCKET, PI_W + CLR + PORT_CLR
+    IN_R = PI_R + 0.2
+    OUT_X0, OUT_Y0 = IN_X0 - WALL, IN_Y0 - WALL
+    OUT_L, OUT_W, OUT_R = IN_L + 2 * WALL, IN_W + 2 * WALL, IN_R + WALL
+    Z_PI = standoff
+    Z_PT = Z_PI + PI_T
+    Z_LID = Z_PT + h_in
+    Z_TOP = Z_LID + LID_T
+    LENS_X = OUT_X0 + OUT_L / 2 if LENS_X_SET is None else LENS_X_SET
+    LENS_Y = OUT_Y0 + OUT_W / 2 if LENS_Y_SET is None else LENS_Y_SET
+    if header:
+        LENS_Y += HDR_LENS_DY
+    CAM_BOTTOM_X = LENS_X + CAM_LENS_V                 # the connector edge (v = 0), toward the Pi's CSI end
+    CAM_CY = LENS_Y - (CAM_LENS_U - CAM_W / 2)         # the camera's centre line
+
+
+derive(False)
 
 
 def cam_xy(u, v):
@@ -125,9 +157,9 @@ def body():
     b -= inner.extrude(Z_LID + 1).translate([0, 0, 0])
     # pads with pegs that go through the Pi's holes
     for hx, hy in PI_HOLES:
-        b += cyl(hx, hy, 0, STANDOFF_D, STANDOFF)
-        b += cyl(hx, hy, STANDOFF, PEG_D, PEG_H - PEG_TIP)
-        b += Manifold.cylinder(PEG_TIP, PEG_D / 2, PEG_D / 2 - 0.4).translate([hx, hy, STANDOFF + PEG_H - PEG_TIP])
+        b += cyl(hx, hy, 0, STANDOFF_D, Z_PI)
+        b += cyl(hx, hy, Z_PI, PEG_D, PEG_H - PEG_TIP + 0.01)   # into the tip: no float seam
+        b += Manifold.cylinder(PEG_TIP, PEG_D / 2, PEG_D / 2 - 0.4).translate([hx, hy, Z_PI + PEG_H - PEG_TIP])
     # snap grooves along the inside of the long walls
     z0 = Z_LID - SNAP_Z - GROOVE_H / 2
     b -= box(IN_X0 + IN_R, IN_Y0 - GROOVE_D, z0, IN_L - 2 * IN_R, GROOVE_D + 0.01, GROOVE_H)
@@ -160,7 +192,7 @@ def lid():
             l += prof.extrude(SNAP_LEN).rotate([90, 0, 90]).translate([xc - SNAP_LEN / 2, y0, zc])
     # posts that press the Pi onto the pegs, recessed for the peg tips
     for hx, hy in PI_HOLES:
-        l += cyl(hx, hy, Z_PT + 0.2, POST_D, H_IN - 0.2)
+        l += cyl(hx, hy, Z_PT + 0.2, POST_D, Z_LID - Z_PT - 0.2)
         l -= cyl(hx, hy, Z_PT - 1, POST_RECESS_D, POST_RECESS_H + 1)
     # camera bosses with pegs, and two clips hooking over the board's long edges
     for u in CAM_HOLES_U:
@@ -197,6 +229,10 @@ def mock_pi():
     p += box(-SD_OUT, SD_Y - 5.5, Z_PT + 0.3, SD_OUT + 10.0, 11.0, 1.0)  # seated card, sticking out
     p += box(60.0, 7.0, Z_PT, 5.0, 16.0, 1.6)                     # CSI connector
     p += box(24.0, 8.0, Z_PT, 14.0, 14.0, 1.5)                    # SoC
+    if HEADER:
+        x0, y0 = HDR_X - HDR_L / 2, HDR_Y - HDR_W / 2
+        p += box(x0, y0, Z_PT, HDR_L, HDR_W, HDR_TOP)                 # header and pins
+        p += box(x0, y0, Z_PI - HDR_TAIL, HDR_L, HDR_W, HDR_TAIL)     # solder tails
     return p
 
 
@@ -335,27 +371,31 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out = os.path.join(here, "stl")
     os.makedirs(out, exist_ok=True)
-    b = body()
-    l = lid()
-    probs, pi, cam = check(b, l)
-    for p in probs:
-        print("CHECK:", p)
-    if not probs:
-        print("checks: Pi, camera and posts clear")
-    parts = {"body": b, "lid": l.rotate([180, 0, 0])}
-    for name, man in parts.items():
-        man = print_ready(man)
-        path = os.path.join(out, f"{name}.stl")
-        write_stl(path, man)
-        for d in args.copy_to:
-            copy_fresh(path, os.path.expanduser(d))
-        bb = man.bounding_box()
-        print(f"{name:6s} {bb[3]-bb[0]:5.1f} x {bb[4]-bb[1]:5.1f} x {bb[5]-bb[2]:5.1f} mm, "
-              f"{man.volume()/1000:.1f} cm3, {man.num_tri()} tris, genus {man.genus()}")
-    print(f"outer {OUT_L:.1f} x {OUT_W:.1f} x {Z_TOP + FLOOR:.1f} mm "
-          f"(lens tip +{Z_LID - CAM_BOSS_H + CAM_FRONT - Z_TOP:.1f}), lens at x={LENS_X:.1f} y={LENS_Y:.1f}")
+    for header in (False, True):
+        derive(header)
+        suffix = "-header" if header else ""
+        print("with pin header:" if header else "without pin header:")
+        b = body()
+        l = lid()
+        probs, pi, cam = check(b, l)
+        for p in probs:
+            print("CHECK:", p)
+        if not probs:
+            print("checks: Pi, camera and posts clear")
+        parts = {"body": b, "lid": l.rotate([180, 0, 0])}
+        for name, man in parts.items():
+            man = print_ready(man)
+            path = os.path.join(out, f"{name}{suffix}.stl")
+            write_stl(path, man)
+            for d in args.copy_to:
+                copy_fresh(path, os.path.expanduser(d))
+            bb = man.bounding_box()
+            print(f"{name + suffix:13s} {bb[3]-bb[0]:5.1f} x {bb[4]-bb[1]:5.1f} x {bb[5]-bb[2]:5.1f} mm, "
+                  f"{man.volume()/1000:.1f} cm3, {man.num_tri()} tris, genus {man.genus()}")
+        print(f"outer {OUT_L:.1f} x {OUT_W:.1f} x {Z_TOP + FLOOR:.1f} mm "
+              f"(lens tip +{Z_LID - CAM_BOSS_H + CAM_FRONT - Z_TOP:.1f}), lens at x={LENS_X:.1f} y={LENS_Y:.1f}")
+        preview(os.path.join(here, f"preview{suffix}.png"), b, l)
     print("no screws: Pi on pegs under the lid posts, camera on pegs under two clips, lid snaps in")
-    preview(os.path.join(here, "preview.png"), b, l)
     for d in args.copy_to:
         print(f"copied to {d}")
 

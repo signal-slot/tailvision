@@ -20,11 +20,13 @@ the walls, tubes and bosses.
 | `stl/body.stl` | Pi on four pegs rising from the floor, openings for the USB port and the microSD, a 6 mm pocket at the camera end where the cable U-turns, flat back |
 | `stl/lid.stl` | carries the camera lens-out on four pegs and two clips; snaps into the body, and four posts hold the Pi down on the body's pegs |
 
+`stl/body-header.stl` and `stl/lid-header.stl` are the same case for a Pi with the 2x20 pin header soldered on (Zero WH): 19.8 mm thick instead of 13.7. The Pi sits 1.8 mm higher so the solder tails clear the floor. The lid sits 4.3 mm higher so the header pins clear the camera clip. The lens window is 0.8 mm off centre toward the USB side, so the camera's back connector clears the header. `preview-header.png` is its render. The header stays inside; there is no opening for it.
+
 No screws. Besides the Pi and the camera:
 
 - Raspberry Pi Zero camera cable, 38 mm (the short one sold for the Zero case).
 
-Outer size 75 × 35 × 13.7 mm. The lens housing stands 0.7 mm proud of the lid and the lens tip 4.3 mm, so do not lay the unit lens down on a hard desk. The bottom is flat and closed.
+Outer size 75 × 35 × 13.7 mm (19.8 mm with the pin header). The lens housing stands 0.7 mm proud of the lid and the lens tip 4.3 mm, so do not lay the unit lens down on a hard desk. The bottom is flat and closed.
 
 ## Printing
 
@@ -50,7 +52,7 @@ No supports. PLA or PETG, 0.2 mm layers, 3 walls. The snap ridges, the camera cl
 ```
 uv venv .venv && . .venv/bin/activate
 uv pip install manifold3d numpy pillow
-python3 case.py                      # stl/*.stl, preview.png
+python3 case.py                      # stl/*.stl, preview.png, preview-header.png (both variants)
 python3 case.py --copy-to ~/shared   # and a fresh copy of each STL there
 ```
 
