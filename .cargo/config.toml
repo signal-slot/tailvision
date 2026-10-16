@@ -13,6 +13,18 @@ rustflags = [
     "-C", "target-cpu=arm1176jzf-s",
 ]
 
+# LicheeRV Nano (SOPHGO SG2002, C906 RV64GC) as a fully static musl binary:
+#
+#   rustup target add riscv64gc-unknown-linux-musl
+#   cargo build --release --target riscv64gc-unknown-linux-musl
+[target.riscv64gc-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=ld.lld",
+    "-C", "link-self-contained=yes",
+    "-C", "target-feature=+crt-static",
+]
+
 [profile.release]
 strip = true
 lto = "fat"
