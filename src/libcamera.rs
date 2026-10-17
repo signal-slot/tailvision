@@ -2,10 +2,62 @@
 //! (Camera Module 2/3, HQ, ...). The ISP, auto-exposure, white balance and
 //! autofocus all live in rpicam-apps; we only ask it for one JPEG.
 
-use std::process::Command;
-use std::time::Duration;
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+
+/// One rpicam-still at a time. A second one started while the first holds
+/// the camera fails ("pipeline handler in use"), and the first can then be
+/// left retrying `unicam: Failed to start media pipeline: -22` forever.
+static CAMERA: Mutex<()> = Mutex::new(());
+
+/// How long rpicam-still may take beyond its settle time before it is
+/// killed. A full-resolution capture and JPEG encode takes about 12 s on a
+/// Zero W; a hung one never finishes and would hold the camera for good.
+const HANG_LIMIT: Duration = Duration::from_secs(60);
+
+/// Runs `cmd` holding the camera, killing it after `limit`.
+fn run_camera(cmd: &mut Command, limit: Duration) -> Result<Output> {
+    let _camera = CAMERA.lock().unwrap_or_else(|e| e.into_inner());
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run rpicam-still")?;
+    let drain = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = r.read_to_end(&mut buf);
+            buf
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().expect("piped stdout")));
+    let stderr = drain(Box::new(child.stderr.take().expect("piped stderr")));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(st) = child.try_wait().context("wait for rpicam-still")? {
+            break st;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(
+                "rpicam-still hung (no frame after {}s) and was killed; the camera is free again",
+                limit.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
 
 /// Camera settings measured once and then held fixed, so every screenshot
 /// comes out the same and the capture needs no settling time. Auto-exposure
@@ -103,10 +155,11 @@ pub struct CameraInfo {
 }
 
 pub fn probe() -> Option<CameraInfo> {
-    let out = Command::new("rpicam-still")
-        .arg("--list-cameras")
-        .output()
-        .ok()?;
+    let out = run_camera(
+        Command::new("rpicam-still").arg("--list-cameras"),
+        HANG_LIMIT,
+    )
+    .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() || text.contains("No cameras available") {
         return None;
@@ -125,9 +178,12 @@ pub fn probe() -> Option<CameraInfo> {
 
 /// Describes the cameras libcamera sees, for the setup page and logs.
 pub fn describe() -> String {
-    match Command::new("rpicam-still").arg("--list-cameras").output() {
+    match run_camera(
+        Command::new("rpicam-still").arg("--list-cameras"),
+        HANG_LIMIT,
+    ) {
         Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        Err(e) => format!("rpicam-still not available: {e}"),
+        Err(e) => format!("rpicam-still not available: {e:#}"),
     }
 }
 
@@ -220,8 +276,10 @@ fn capture(req: &CsiRequest) -> Result<Frame> {
         }
     }
     // Always: the crop tells which part of the sensor the frame shows.
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let meta_path =
-        std::env::temp_dir().join(format!("tailvision-meta-{}.json", std::process::id()));
+        std::env::temp_dir().join(format!("tailvision-meta-{}-{seq}.json", std::process::id()));
     cmd.args([
         "--metadata",
         &meta_path.to_string_lossy(),
@@ -229,7 +287,7 @@ fn capture(req: &CsiRequest) -> Result<Frame> {
         "json",
     ]);
     cmd.args(&req.extra_args);
-    let out = cmd.output().context("run rpicam-still")?;
+    let out = run_camera(&mut cmd, settle + HANG_LIMIT)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let last = err
