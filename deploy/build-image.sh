@@ -21,6 +21,9 @@ BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://downloads.raspberrypi.com/raspios_lite
 TAILSCALE_VERSION="${TAILSCALE_VERSION:-1.102.4}"
 
 # ---------------------------------------------------------------- settings
+# bash fills HOSTNAME with the build machine's name unless it came from the
+# environment; drop that so the default below (or image.env) applies.
+[[ "$(declare -p HOSTNAME 2>/dev/null)" == "declare -x"* ]] || unset HOSTNAME
 if [ -f "$env_file" ]; then
     # shellcheck disable=SC1090
     . "$env_file"
