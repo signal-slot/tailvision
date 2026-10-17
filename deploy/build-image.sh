@@ -17,8 +17,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 build="$root/build"
 env_file="${IMAGE_ENV:-$root/deploy/image.env}"
 
-BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://downloads.raspberrypi.com/raspios_lite_armhf/images/raspios_lite_armhf-2026-09-15/2026-09-15-raspios-trixie-armhf-lite.img.xz}"
-TAILSCALE_VERSION="${TAILSCALE_VERSION:-1.102.4}"
+BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://downloads.raspberrypi.com/raspios_lite_armhf/images/raspios_lite_armhf-2026-10-06/2026-10-06-raspios-trixie-armhf-lite.img.xz}"
+TAILSCALE_VERSION="${TAILSCALE_VERSION:-1.104.1}"
 
 # ---------------------------------------------------------------- settings
 # bash fills HOSTNAME with the build machine's name unless it came from the
