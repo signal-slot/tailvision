@@ -5,7 +5,11 @@ set -eu
 
 host="${1:?usage: $0 user@host}"
 dir="$(cd "$(dirname "$0")/.." && pwd)"
-bin="$dir/target/arm-unknown-linux-musleabihf/release/tailvision"
+# Cargo puts the build under $CARGO_TARGET_DIR when set (relative to the
+# directory cargo runs in, the repository root here).
+target_dir="${CARGO_TARGET_DIR:-target}"
+case "$target_dir" in /*) ;; *) target_dir="$dir/$target_dir" ;; esac
+bin="$target_dir/arm-unknown-linux-musleabihf/release/tailvision"
 
 if [ ! -x "$bin" ]; then
     echo "binary not found; run: cargo build --release --target arm-unknown-linux-musleabihf" >&2

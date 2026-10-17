@@ -19,7 +19,11 @@ while [ $# -gt 0 ]; do
 done
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-bin="$root/target/arm-unknown-linux-musleabihf/release/tailvision"
+# Cargo puts the build under $CARGO_TARGET_DIR when set (relative to the
+# directory cargo runs in, the repository root here).
+target_dir="${CARGO_TARGET_DIR:-target}"
+case "$target_dir" in /*) ;; *) target_dir="$root/$target_dir" ;; esac
+bin="$target_dir/arm-unknown-linux-musleabihf/release/tailvision"
 sdusb="$(command -v sdusb || ls "$root"/../microsd-ota/gateware/tools/sdusb/target/release/sdusb 2>/dev/null || true)"
 [ -x "$bin" ] || { echo "build first: cargo build --release --target arm-unknown-linux-musleabihf" >&2; exit 1; }
 [ -x "$sdusb" ] || { echo "sdusb not found (build microsd-ota/gateware/tools/sdusb)" >&2; exit 1; }
