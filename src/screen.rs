@@ -23,6 +23,8 @@ use imageproc::morphology::{close, dilate, erode};
 use imageproc::point::Point;
 use imageproc::region_labelling::{Connectivity, connected_components};
 
+mod multi;
+
 pub type Pt = (f32, f32);
 
 /// Four corners ordered top-left, top-right, bottom-right, bottom-left.
@@ -646,8 +648,33 @@ fn debug_save(name: &str, img: &GrayImage) {
 #[cfg(not(test))]
 fn debug_save(_name: &str, _img: &GrayImage) {}
 
-/// The LCD-likeliest convex quad in a (small) frame, or None.
-pub fn find_screen_quad(rgb: &RgbImage, min_area_ratio: f32) -> Option<Quad> {
+/// A candidate outline with everything the scores are made of.
+#[derive(Debug, Clone)]
+struct Candidate {
+    origin: &'static str,
+    q: Quad,
+    /// A real brightness step along the outline (0 = none).
+    boundary: f32,
+    outside_plain: f32,
+    inner_fit: f32,
+    aspect: f32,
+    area_ratio: f32,
+    /// Share of all the frame's bright content inside the outline.
+    coverage: f32,
+    tight: f32,
+}
+
+/// Every candidate outline in a (small) frame, measured, with frame-wide
+/// quads and duplicates dropped.
+struct Candidates {
+    list: Vec<Candidate>,
+    /// Enough bright content in the frame for the coverage terms to mean anything.
+    use_coverage: bool,
+    /// The bright content's pixels.
+    content: Vec<Pt>,
+}
+
+fn screen_candidates(rgb: &RgbImage, min_area_ratio: f32) -> Candidates {
     let (w, h) = rgb.dimensions();
     let gray = luma_of(rgb);
     let value = value_of(rgb);
@@ -774,8 +801,7 @@ pub fn find_screen_quad(rgb: &RgbImage, min_area_ratio: f32) -> Option<Quad> {
         .map(|(x, y, _)| (x as f32, y as f32))
         .collect();
     let mut seen: Vec<Quad> = Vec::new();
-    let mut best_real: Option<(f32, Quad)> = None;
-    let mut best_any: Option<(f32, Quad)> = None;
+    let mut out = Vec::new();
     for (origin, q) in pool {
         let q = if origin == "ui" {
             q
@@ -803,50 +829,454 @@ pub fn find_screen_quad(rgb: &RgbImage, min_area_ratio: f32) -> Option<Quad> {
             boundary = boundary.max(0.5);
             inner_fit = 1.0;
         }
-        let area_ratio = (q.area() / frame_area).min(0.90);
-        let aspect = aspect_score(&q);
-        let coverage = content_coverage(&content, &q, total_bright);
-        let tight = tightness(&q);
-        let score = if use_coverage {
-            // A quad that leaves bright content outside is a sub-element
-            // (a card, a panel of a multi-panel UI), not the screen.
-            let sub_element = if coverage >= 0.9 {
-                1.0
-            } else if coverage >= 0.75 {
-                0.6 + (coverage - 0.75) / 0.15 * 0.4
-            } else {
-                0.4
-            };
-            sub_element
-                * boundary
-                * (0.25 * aspect
-                    + 0.05 * area_ratio
-                    + 0.25 * coverage
-                    + 0.10 * outside_plain
-                    + 0.15 * tight
-                    + 0.20 * inner_fit)
+        out.push(Candidate {
+            origin,
+            q,
+            boundary,
+            outside_plain,
+            inner_fit,
+            aspect: aspect_score(&q),
+            area_ratio: (q.area() / frame_area).min(0.90),
+            coverage: content_coverage(&content, &q, total_bright),
+            tight: tightness(&q),
+        });
+    }
+    Candidates {
+        list: out,
+        use_coverage,
+        content: content
+            .enumerate_pixels()
+            .filter(|(_, _, p)| p[0] > 0)
+            .map(|(x, y, _)| (x as f32, y as f32))
+            .collect(),
+    }
+}
+
+/// The score of a candidate as the screen, from its coverage and tightness
+/// (the frame-wide ones, or those of `local_terms`).
+fn score(c: &Candidate, use_coverage: bool, coverage: f32, tight: f32) -> f32 {
+    if use_coverage {
+        // A quad that leaves bright content outside is a sub-element
+        // (a card, a panel of a multi-panel UI), not the screen.
+        let sub_element = if coverage >= 0.9 {
+            1.0
+        } else if coverage >= 0.75 {
+            0.6 + (coverage - 0.75) / 0.15 * 0.4
         } else {
-            boundary * (0.35 * aspect + 0.30 * area_ratio + 0.15 * outside_plain + 0.20 * inner_fit)
+            0.4
         };
+        sub_element
+            * c.boundary
+            * (0.25 * c.aspect
+                + 0.05 * c.area_ratio
+                + 0.25 * coverage
+                + 0.10 * c.outside_plain
+                + 0.15 * tight
+                + 0.20 * c.inner_fit)
+    } else {
+        c.boundary
+            * (0.35 * c.aspect + 0.30 * c.area_ratio + 0.15 * c.outside_plain + 0.20 * c.inner_fit)
+    }
+}
+
+/// The LCD-likeliest convex quad in a (small) frame, or None. With several
+/// screens in view the frame-wide scores favour an outline around all of
+/// them; when the pick holds two or more screens judged one by one with
+/// dark between them (desk and bezels, where tiles of one UI sit on its lit
+/// background), the best of those is taken instead.
+pub fn find_screen_quad(rgb: &RgbImage, min_area_ratio: f32) -> Option<Quad> {
+    let cands = screen_candidates(rgb, min_area_ratio);
+    let single = best_single(&cands)?.q;
+    // best_each never keeps two overlapping outlines, so these are separate.
+    let held: Vec<(f32, Quad)> = best_each(&cands)
+        .into_iter()
+        .filter(|(_, q)| share_inside(q, &single) >= 0.8 && q.area() <= 0.7 * single.area())
+        .collect();
+    if held.len() >= 2 && dark_between(rgb, &single, &held) {
         #[cfg(test)]
         eprintln!(
-            "  {origin:6} score={score:.3} boundary={boundary:.2} plain={outside_plain:.2} fit={inner_fit:.2} tight={tight:.2} aspect={aspect:.2} area={area_ratio:.2} cov={coverage:.2} {:?}",
-            q.0.map(|p| (p.0 as i32, p.1 as i32))
+            "  single pick holds {} screens with dark between them; taking the best of them",
+            held.len()
         );
-        if boundary <= 0.0 || score <= 0.0 {
+        return Some(held[0].1);
+    }
+    // Screens drawn by their edges, and the pick (with no edges of its own)
+    // is none of them, or cuts through one: it spans some of them, or is a
+    // patch of desk.
+    // A real screen's outline runs along edges on (nearly) all four sides.
+    let (sides, outlines) = multi::sides_and_outlines(rgb, &single, min_area_ratio);
+    let mut sorted = sides;
+    sorted.sort_by(f32::total_cmp);
+    #[cfg(test)]
+    eprintln!(
+        "  single pick sides {:?}",
+        sides.map(|s| (s * 100.0) as i32)
+    );
+    let same =
+        |o: &multi::Found| share_inside(&o.q, &single) >= 0.8 && share_inside(&single, &o.q) >= 0.8;
+    // An outline the pick cuts through: part of it inside, part outside.
+    let crossed = |o: &multi::Found| (0.15..0.8).contains(&share_inside(&o.q, &single));
+    if sorted[1] < 0.5
+        && ((outlines.len() >= 2 && !outlines.iter().any(same)) || outlines.iter().any(crossed))
+    {
+        #[cfg(test)]
+        eprintln!(
+            "  single pick is none of {} outlined screens; taking the best",
+            outlines.len()
+        );
+        return Some(outlines[0].q);
+    }
+    Some(single)
+}
+
+/// True when the part of `outer` outside the `inner` outlines is dark next
+/// to them: under a quarter of their mean brightness.
+fn dark_between(rgb: &RgbImage, outer: &Quad, inner: &[(f32, Quad)]) -> bool {
+    let gray = luma_of(rgb);
+    let (w, h) = gray.dimensions();
+    let mut gap = filled_mask(w, h, outer);
+    let mut held = GrayImage::new(w, h);
+    for (_, q) in inner {
+        // Grown a little so their own bezels do not count as the gap.
+        draw_polygon_mut(&mut gap, &q.with_margin(-0.1).to_i32(), Luma([0u8]));
+        draw_polygon_mut(&mut held, &q.to_i32(), Luma([255u8]));
+    }
+    match (mean_under(&gray, &gap), mean_under(&gray, &held)) {
+        (Some(g), Some(s)) => g < 0.25 * s,
+        _ => false,
+    }
+}
+
+/// The pick by frame-wide scores, made for a frame with one screen in it.
+fn best_single(cands: &Candidates) -> Option<&Candidate> {
+    let use_coverage = cands.use_coverage;
+    let mut best_real: Option<(f32, &Candidate)> = None;
+    let mut best_any: Option<(f32, &Candidate)> = None;
+    for c in &cands.list {
+        let score = score(c, use_coverage, c.coverage, c.tight);
+        #[cfg(test)]
+        eprintln!(
+            "  {:6} score={score:.3} boundary={:.2} plain={:.2} fit={:.2} tight={:.2} aspect={:.2} area={:.2} cov={:.2} {:?}",
+            c.origin,
+            c.boundary,
+            c.outside_plain,
+            c.inner_fit,
+            c.tight,
+            c.aspect,
+            c.area_ratio,
+            c.coverage,
+            c.q.0.map(|p| (p.0 as i32, p.1 as i32))
+        );
+        if c.boundary <= 0.0 || score <= 0.0 {
             continue;
         }
-        if origin != "ui"
-            && (!use_coverage || coverage >= 0.9)
+        if c.origin != "ui"
+            && (!use_coverage || c.coverage >= 0.9)
             && best_real.is_none_or(|(s, _)| score > s)
         {
-            best_real = Some((score, q));
+            best_real = Some((score, c));
         }
         if best_any.is_none_or(|(s, _)| score > s) {
-            best_any = Some((score, q));
+            best_any = Some((score, c));
         }
     }
-    best_real.or(best_any).map(|(_, q)| q)
+    best_real.or(best_any).map(|(_, c)| c)
+}
+
+/// True when `p` lies inside the convex quad.
+fn inside_quad(q: &Quad, p: Pt) -> bool {
+    let mut sign = 0.0f32;
+    for i in 0..4 {
+        let (a, b) = (q.0[i], q.0[(i + 1) % 4]);
+        let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+        if cross != 0.0 {
+            if sign == 0.0 {
+                sign = cross.signum();
+            } else if cross.signum() != sign {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Roughly how much of `a` lies inside `b`, from a grid of points over `a`.
+fn share_inside(a: &Quad, b: &Quad) -> f32 {
+    const N: usize = 12;
+    let [tl, tr, br, bl] = a.0;
+    let lerp = |p: Pt, q: Pt, t: f32| (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t);
+    let mut hits = 0;
+    for i in 0..N {
+        let v = (i as f32 + 0.5) / N as f32;
+        let (l, r) = (lerp(tl, bl, v), lerp(tr, br, v));
+        for j in 0..N {
+            if inside_quad(b, lerp(l, r, (j as f32 + 0.5) / N as f32)) {
+                hits += 1;
+            }
+        }
+    }
+    hits as f32 / (N * N) as f32
+}
+
+/// Coverage and tightness judged against the content near the outline only:
+/// the share of the content within a ring a fifth of the outline's size wide
+/// that lies inside it, and how much of its bounding box that content spans.
+/// A whole screen scores high however many other screens are in view; a card
+/// on a screen leaves the rest of that screen's content in the ring.
+fn local_terms(q: &Quad, content: &[Pt]) -> (f32, f32) {
+    let around = q.with_margin(-0.4);
+    let xs = around.0.iter().map(|p| p.0);
+    let ys = around.0.iter().map(|p| p.1);
+    let (ax0, ax1) = (
+        xs.clone().fold(f32::MAX, f32::min),
+        xs.fold(f32::MIN, f32::max),
+    );
+    let (ay0, ay1) = (
+        ys.clone().fold(f32::MAX, f32::min),
+        ys.fold(f32::MIN, f32::max),
+    );
+    let (mut n_in, mut n_around) = (0u32, 0u32);
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &p in content {
+        if p.0 < ax0 || p.0 > ax1 || p.1 < ay0 || p.1 > ay1 || !inside_quad(&around, p) {
+            continue;
+        }
+        n_around += 1;
+        if inside_quad(q, p) {
+            n_in += 1;
+            x0 = x0.min(p.0);
+            y0 = y0.min(p.1);
+            x1 = x1.max(p.0);
+            y1 = y1.max(p.1);
+        }
+    }
+    if n_in == 0 {
+        return (0.0, 0.0);
+    }
+    let xs = q.0.iter().map(|p| p.0);
+    let ys = q.0.iter().map(|p| p.1);
+    let bw = xs.clone().fold(f32::MIN, f32::max) - xs.fold(f32::MAX, f32::min);
+    let bh = ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min);
+    let tight = ((x1 - x0 + 1.0) * (y1 - y0 + 1.0) / (bw * bh).max(1.0)).min(1.0);
+    (n_in as f32 / n_around as f32, tight)
+}
+
+/// Every screen in a (small) frame, best first: each candidate is scored
+/// against the content around it instead of the whole frame's, outlines that
+/// span two or more separate screens are dropped, and of overlapping
+/// outlines the better one stays.
+pub fn find_screen_quads(rgb: &RgbImage, min_area_ratio: f32) -> Vec<(f32, Quad)> {
+    best_each(&screen_candidates(rgb, min_area_ratio))
+}
+
+fn best_each(cands: &Candidates) -> Vec<(f32, Quad)> {
+    let mut scored: Vec<(f32, Quad)> = cands
+        .list
+        .iter()
+        // The content's bounding box spans every screen at once.
+        .filter(|c| c.origin != "ui" && c.boundary > 0.0)
+        .filter_map(|c| {
+            let (coverage, tight) = local_terms(&c.q, &cands.content);
+            let s = score(c, cands.use_coverage, coverage, tight);
+            #[cfg(test)]
+            eprintln!(
+                "  multi {:6} score={s:.3} local_cov={coverage:.2} local_tight={tight:.2} {:?}",
+                c.origin,
+                c.q.0.map(|p| (p.0 as i32, p.1 as i32))
+            );
+            (s > 0.0).then_some((s, c.q))
+        })
+        .collect();
+    let Some(top) = scored.iter().map(|(s, _)| *s).reduce(f32::max) else {
+        return Vec::new();
+    };
+    scored.retain(|(s, _)| *s >= 0.35 * top);
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    // An outline holding two good outlines that do not overlap each other
+    // is a box around several screens.
+    let containers: Vec<bool> = scored
+        .iter()
+        .map(|(s, q)| {
+            let inner: Vec<&Quad> = scored
+                .iter()
+                .filter(|(si, qi)| {
+                    *si >= 0.6 * s && qi.area() <= 0.7 * q.area() && share_inside(qi, q) >= 0.8
+                })
+                .map(|(_, qi)| qi)
+                .collect();
+            inner.iter().enumerate().any(|(i, a)| {
+                inner[i + 1..]
+                    .iter()
+                    .any(|b| share_inside(a, b) < 0.2 && share_inside(b, a) < 0.2)
+            })
+        })
+        .collect();
+    let mut kept: Vec<(f32, Quad)> = Vec::new();
+    for ((s, q), container) in scored.into_iter().zip(containers) {
+        if container {
+            continue;
+        }
+        if kept
+            .iter()
+            .all(|(_, k)| share_inside(&q, k) < 0.5 && share_inside(k, &q) < 0.5)
+        {
+            kept.push((s, q));
+        }
+    }
+    kept
+}
+
+/// Every screen, best first. Outlines drawn by straight edges on (at least
+/// three of) their four sides come first (see `multi`). In a dark room a
+/// screen with a black UI has no visible edge at all, only its lit content,
+/// so screens found by their content are added where no outline is, when
+/// they glow out of darkness.
+pub fn find_all_screens(rgb: &RgbImage, min_area_ratio: f32) -> Vec<(f32, Quad)> {
+    let mut all: Vec<(f32, Quad)> = multi::outlines(rgb, min_area_ratio)
+        .into_iter()
+        .map(|f| (f.score, f.q))
+        .collect();
+    let gray = luma_of(rgb);
+    // Only a dark room can hide a screen's edges; elsewhere the search by
+    // content costs seconds on a Zero and finds desk.
+    if median(&gray) >= 15 {
+        return all;
+    }
+    for (s, q) in glowing_screens(rgb, min_area_ratio) {
+        let free = all
+            .iter()
+            .all(|(_, o)| share_inside(&q, o) < 0.3 && share_inside(o, &q) < 0.3);
+        if free && in_the_dark(&gray, &q) {
+            all.push((s, q));
+        }
+    }
+    all
+}
+
+/// True when the surroundings of `q` are dark, and much darker than it.
+fn in_the_dark(gray: &GrayImage, q: &Quad) -> bool {
+    let (w, h) = gray.dimensions();
+    let mut ring = filled_mask(w, h, &q.with_margin(-0.15));
+    draw_polygon_mut(&mut ring, &q.with_margin(-0.03).to_i32(), Luma([0u8]));
+    let inside = filled_mask(w, h, q);
+    match (mean_under(gray, &ring), mean_under(gray, &inside)) {
+        (Some(r), Some(i)) => {
+            #[cfg(test)]
+            eprintln!(
+                "  glow {:?} ring={r:.1} inside={i:.1}",
+                q.0.map(|p| (p.0 as i32, p.1 as i32))
+            );
+            r < 12.0 && r < 0.4 * i
+        }
+        _ => false,
+    }
+}
+
+/// Below this an outline is a dark patch of desk, not a screen.
+const MIN_SCREEN_SCORE: f32 = 0.15;
+
+/// Screens found by their bright content, peeling: after each round the
+/// screens found are painted over with the frame's dark level and the rest
+/// is searched again, so a dim screen gets thresholds of its own instead of
+/// the brightest screen's; each is then detected again in a close-up.
+fn glowing_screens(rgb: &RgbImage, min_area_ratio: f32) -> Vec<(f32, Quad)> {
+    let dark = {
+        let v = percentile(&value_of(rgb), 10.0);
+        Rgb([v, v, v])
+    };
+    let mut img = rgb.clone();
+    let mut found: Vec<(f32, Quad)> = Vec::new();
+    for _ in 0..4 {
+        let round = find_screen_quads(&img, min_area_ratio);
+        // Only the confident ones: a weak outline is often a piece of a dim
+        // screen that the next round, with that screen's own thresholds,
+        // finds whole.
+        let top = round.first().map_or(0.0, |(s, _)| *s);
+        let new: Vec<(f32, Quad)> = round
+            .into_iter()
+            .filter(|(s, _)| *s >= 0.75 * top && *s >= MIN_SCREEN_SCORE)
+            .filter(|(_, q)| {
+                found
+                    .iter()
+                    .all(|(_, f)| share_inside(q, f) < 0.5 && share_inside(f, q) < 0.5)
+            })
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        for (_, q) in &new {
+            draw_polygon_mut(&mut img, &q.with_margin(-0.06).to_i32(), dark);
+        }
+        found.extend(new);
+    }
+    (0..found.len())
+        .map(|i| {
+            let others: Vec<Quad> = found
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, (_, q))| *q)
+                .collect();
+            let (s, q) = found[i];
+            (s, refine_alone(rgb, &q, &others, dark).unwrap_or(q))
+        })
+        .collect()
+}
+
+/// Detects the screen again in a close-up around `q`, with the other
+/// screens painted out: there it dominates the view, which is what the
+/// single-screen detector is tuned for, so dim screens get their real
+/// corners rather than those of their brightest part. None when the
+/// close-up finds something else.
+fn refine_alone(rgb: &RgbImage, q: &Quad, others: &[Quad], dark: Rgb<u8>) -> Option<Quad> {
+    let (crop, x0, y0, up) = close_up(rgb, q, 0.3);
+    let mut crop = crop;
+    let shift = |o: &Quad| Quad(o.0.map(|p| ((p.0 - x0) * up, (p.1 - y0) * up)));
+    for o in others {
+        draw_polygon_mut(&mut crop, &shift(o).with_margin(-0.06).to_i32(), dark);
+    }
+    let r = find_screen_quad(&crop, 0.1)?.scaled(1.0 / up);
+    let r = Quad(r.0.map(|p| (p.0 + x0, p.1 + y0)));
+    // The same screen: they mostly overlap both ways.
+    (share_inside(&r, q) >= 0.6 && share_inside(q, &r) >= 0.6).then_some(r)
+}
+
+/// The bounding box of `q` grown by `margin` of its size on each side,
+/// clipped to the image and scaled so its longer side is DETECT_SIZE; with
+/// its top-left corner in `rgb` and the scale.
+fn close_up(rgb: &RgbImage, q: &Quad, margin: f32) -> (RgbImage, f32, f32, f32) {
+    let (w, h) = (rgb.width() as f32, rgb.height() as f32);
+    let xs = q.0.iter().map(|p| p.0);
+    let ys = q.0.iter().map(|p| p.1);
+    let (x0, x1) = (
+        xs.clone().fold(f32::MAX, f32::min),
+        xs.fold(f32::MIN, f32::max),
+    );
+    let (y0, y1) = (
+        ys.clone().fold(f32::MAX, f32::min),
+        ys.fold(f32::MIN, f32::max),
+    );
+    let (mx, my) = ((x1 - x0) * margin, (y1 - y0) * margin);
+    let cx0 = (x0 - mx).max(0.0).floor();
+    let cy0 = (y0 - my).max(0.0).floor();
+    let cx1 = (x1 + mx).min(w).ceil();
+    let cy1 = (y1 + my).min(h).ceil();
+    let crop = imageops::crop_imm(
+        rgb,
+        cx0 as u32,
+        cy0 as u32,
+        (cx1 - cx0) as u32,
+        (cy1 - cy0) as u32,
+    )
+    .to_image();
+    let up = DETECT_SIZE as f32 / crop.width().max(crop.height()) as f32;
+    let big = imageops::resize(
+        &crop,
+        (crop.width() as f32 * up).round().max(1.0) as u32,
+        (crop.height() as f32 * up).round().max(1.0) as u32,
+        imageops::FilterType::Triangle,
+    );
+    (big, cx0, cy0, up)
 }
 
 /// A capped or unplugged sensor: near-uniform and dim.
@@ -886,6 +1316,123 @@ pub fn detect(
     min_area_ratio: f32,
     lens: Option<&crate::lens::Lens>,
 ) -> Result<Quad> {
+    let (small, f) = detection_copy(frame, lens)?;
+    let q = find_screen_quad(&small, min_area_ratio)
+        .ok_or_else(|| anyhow!("no screen-like quadrilateral found; frame the LCD so it dominates the view, add light, or pass manual_corners"))?;
+    Ok(q.scaled(1.0 / f))
+}
+
+/// Every screen in a full-resolution frame, numbered left to right by
+/// their centres (index 0 = leftmost); corners as for `detect`.
+pub fn detect_all(
+    frame: &RgbImage,
+    min_area_ratio: f32,
+    lens: Option<&crate::lens::Lens>,
+) -> Result<Vec<Quad>> {
+    let (small, f) = detection_copy(frame, lens)?;
+    let mut all: Vec<Quad> = find_all_screens(&small, min_area_ratio)
+        .into_iter()
+        .map(|(_, q)| q.scaled(1.0 / f))
+        .collect();
+    if all.is_empty() {
+        bail!(
+            "no screen-like quadrilateral found; add light, put something bright on the screens, or pass manual_corners"
+        );
+    }
+    all.sort_by(|a, b| a.centroid().0.total_cmp(&b.centroid().0));
+    Ok(all)
+}
+
+/// Finds the screen inside a rough box `[x0, y0, x1, y1]` of the frame
+/// (corrected-frame pixels with a lens, as capture_debug shows them): the
+/// box is cut out, lens-corrected and scaled to the detection size, so the
+/// screen dominates the view the way the single-screen detector expects,
+/// however many other screens are around it.
+pub fn detect_in(
+    frame: &RgbImage,
+    region: [f32; 4],
+    lens: Option<&crate::lens::Lens>,
+) -> Result<Quad> {
+    let (fw, fh) = (frame.width() as f32, frame.height() as f32);
+    let [x0, y0, x1, y1] = region;
+    let (x0, x1) = (x0.min(x1).max(0.0), x0.max(x1).min(fw));
+    let (y0, y1) = (y0.min(y1).max(0.0), y0.max(y1).min(fh));
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    if rw < 0.03 * fw || rh < 0.03 * fh {
+        bail!(
+            "region [{x0:.0}, {y0:.0}, {x1:.0}, {y1:.0}] is too small or outside the {}x{} frame; give [x0, y0, x1, y1] around the whole screen",
+            frame.width(),
+            frame.height()
+        );
+    }
+    let f = (DETECT_SIZE as f32 / rw.max(rh)).min(1.0);
+    let (ow, oh) = ((rw * f).round() as u32, (rh * f).round() as u32);
+    // Sample from a copy at most twice the output's scale, so the bilinear
+    // lookups do not skip over thin lines.
+    let g = (2.0 * f).min(1.0);
+    let src = if g < 1.0 {
+        imageops::resize(
+            frame,
+            (fw * g).round() as u32,
+            (fh * g).round() as u32,
+            imageops::FilterType::Triangle,
+        )
+    } else {
+        frame.clone()
+    };
+    let mut crop = RgbImage::new(ow.max(1), oh.max(1));
+    // Output pixel → corrected frame pixel → camera pixel → source copy.
+    let to_frame = |u: f32, v: f32| (x0 + u / f, y0 + v / f);
+    match lens {
+        Some(l) => warp_into_with(
+            &src,
+            |u, v| {
+                let p = l.distort(to_frame(u, v));
+                (p.0 * g, p.1 * g)
+            },
+            Interpolation::Bilinear,
+            Border::Constant(Rgb([0, 0, 0])),
+            &mut crop,
+        ),
+        None => warp_into_with(
+            &src,
+            |u, v| {
+                let p = to_frame(u, v);
+                (p.0 * g, p.1 * g)
+            },
+            Interpolation::Bilinear,
+            Border::Constant(Rgb([0, 0, 0])),
+            &mut crop,
+        ),
+    }
+    if looks_blanked(&luma_of(&crop)) {
+        bail!("the region is dark and featureless: is the screen on, and is the region around it?");
+    }
+    // The screen fills most of the box: of the outlines drawn by edges the
+    // big, well-backed one; failing that, the single-screen detector.
+    let area = (crop.width() * crop.height()) as f32;
+    let outlined = multi::all_outlines(&crop, 0.2)
+        .into_iter()
+        .max_by(|a, b| {
+            let v = |o: &multi::Found| o.score * (o.q.area() / area);
+            v(a).total_cmp(&v(b))
+        })
+        .map(|o| o.q);
+    let q = outlined.or_else(|| find_screen_quad(&crop, 0.1)).ok_or_else(|| {
+        anyhow!("no screen found in the region; make it a little larger than the screen, or pass manual_corners")
+    })?;
+    #[cfg(test)]
+    {
+        let _ = crop.save(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/target/region-crop.png"
+        ));
+    }
+    Ok(Quad(q.0.map(|p| to_frame(p.0, p.1))))
+}
+
+/// The small copy detection runs on, lens-corrected, and its scale.
+fn detection_copy(frame: &RgbImage, lens: Option<&crate::lens::Lens>) -> Result<(RgbImage, f32)> {
     let (small, f) = small_copy(frame);
     // Correcting the small copy is cheap, and its coordinates scale with the
     // frame's because the lens mapping is proportional to the frame size.
@@ -896,9 +1443,7 @@ pub fn detect(
     if looks_blanked(&luma_of(&small)) {
         bail!("frame appears blanked (lens cap, no light, or no signal)");
     }
-    let q = find_screen_quad(&small, min_area_ratio)
-        .ok_or_else(|| anyhow!("no screen-like quadrilateral found; frame the LCD so it dominates the view, add light, or pass manual_corners"))?;
-    Ok(q.scaled(1.0 / f))
+    Ok((small, f))
 }
 
 /// Perspective-corrects the quad out of the frame and applies the output
@@ -962,8 +1507,22 @@ pub fn rectify(
 }
 
 /// Draws the corners on a copy of the frame: polygon, a big dot on TL, small dots elsewhere.
-pub fn annotate(frame: &RgbImage, corners: &Quad, source: Source) -> RgbImage {
+pub fn annotate(frame: &RgbImage, corners: &Quad, source: Source, screens: &[Quad]) -> RgbImage {
     let mut out = frame.clone();
+    // Every screen found, in yellow with its number (for take_screenshot's
+    // `screen`); the one chosen goes on top in green.
+    let size = (frame.width().max(frame.height()) as f32 * 0.04).max(12.0);
+    for (i, q) in screens.iter().enumerate() {
+        let pts: Vec<Point<f32>> = q.0.iter().map(|p| Point::new(p.0, p.1)).collect();
+        for d in -1..=1 {
+            let shifted: Vec<Point<f32>> = pts
+                .iter()
+                .map(|p| Point::new(p.x, p.y + d as f32))
+                .collect();
+            draw_hollow_polygon_mut(&mut out, &shifted, Rgb([255, 220, 0]));
+        }
+        draw_number(&mut out, i + 1, q.centroid(), size);
+    }
     let color = match source {
         Source::Manual => Rgb([255, 0, 255]),
         _ => Rgb([0, 255, 0]),
@@ -987,6 +1546,51 @@ pub fn annotate(frame: &RgbImage, corners: &Quad, source: Source) -> RgbImage {
         );
     }
     out
+}
+
+/// Draws `n` in seven-segment digits `size` pixels tall, centred on `at`,
+/// yellow on a black plate so it reads on any screen content.
+fn draw_number(img: &mut RgbImage, n: usize, at: Pt, size: f32) {
+    use imageproc::drawing::draw_filled_rect_mut;
+    use imageproc::rect::Rect;
+    // Segments a..g: top, top right, bottom right, bottom, bottom left, top left, middle.
+    const SEGS: [u8; 10] = [
+        0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110, 0b1101101, 0b1111101, 0b0000111,
+        0b1111111, 0b1101111,
+    ];
+    let digits: Vec<usize> = n.to_string().bytes().map(|b| (b - b'0') as usize).collect();
+    let (h, w, t) = (size, size * 0.55, (size * 0.12).max(2.0));
+    let gap = w * 0.4;
+    let total = digits.len() as f32 * w + (digits.len() - 1) as f32 * gap;
+    let (x0, y0) = (at.0 - total / 2.0, at.1 - h / 2.0);
+    let pad = t * 1.5;
+    let rect = |x: f32, y: f32, rw: f32, rh: f32| {
+        Rect::at(x.round() as i32, y.round() as i32)
+            .of_size(rw.round().max(1.0) as u32, rh.round().max(1.0) as u32)
+    };
+    draw_filled_rect_mut(
+        img,
+        rect(x0 - pad, y0 - pad, total + 2.0 * pad, h + 2.0 * pad),
+        Rgb([0, 0, 0]),
+    );
+    for (k, d) in digits.iter().enumerate() {
+        let x = x0 + k as f32 * (w + gap);
+        let half = h / 2.0;
+        let segs = [
+            (x, y0, w, t),
+            (x + w - t, y0, t, half),
+            (x + w - t, y0 + half, t, half),
+            (x, y0 + h - t, w, t),
+            (x, y0 + half, t, half),
+            (x, y0, t, half),
+            (x, y0 + half - t / 2.0, w, t),
+        ];
+        for (bit, (sx, sy, sw, sh)) in segs.iter().enumerate() {
+            if SEGS[*d] >> bit & 1 == 1 {
+                draw_filled_rect_mut(img, rect(*sx, *sy, *sw, *sh), Rgb([255, 220, 0]));
+            }
+        }
+    }
 }
 
 pub fn decode_jpeg(bytes: &[u8]) -> Result<RgbImage> {
@@ -1182,7 +1786,8 @@ mod tests {
             if score < 0.85 {
                 let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/");
                 std::fs::create_dir_all(dir).unwrap();
-                let _ = annotate(&img, &q, Source::Auto).save(format!("{dir}synthetic-{name}.png"));
+                let _ = annotate(&img, &q, Source::Auto, &[])
+                    .save(format!("{dir}synthetic-{name}.png"));
             }
             assert!(
                 score >= 0.85,
@@ -1275,6 +1880,191 @@ mod tests {
     }
 
     #[test]
+    fn finds_every_screen_in_a_wide_frame() {
+        // A wide-angle frame with three screens: a monitor showing a dim
+        // console (top left), a dark dashboard (bottom left) and a 7" panel
+        // with a bright UI (right).
+        let frame = fixture("scene04_three_screens_wide.jpg");
+        let lens = crate::lens::IMX708_WIDE.at(frame.width(), frame.height(), None);
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/scene04");
+        std::fs::create_dir_all(dir).unwrap();
+        DEBUG_DIR.with(|d| *d.borrow_mut() = Some(dir.to_string()));
+        let all = detect_all(&frame, 0.02, Some(&lens)).unwrap();
+        for q in &all {
+            eprintln!("screen {:?}", q.0.map(|p| (p.0 as i32, p.1 as i32)));
+        }
+        // The 7" panel, by hand on the corrected frame, at 480 px wide.
+        let seven = Quad([
+            (199.0, 94.0),
+            (340.0, 107.0),
+            (320.0, 206.0),
+            (186.0, 164.0),
+        ])
+        .scaled(frame.width() as f32 / 480.0);
+        let n = all
+            .iter()
+            .position(|q| share_inside(q, &seven) > 0.9 && share_inside(&seven, q) > 0.9)
+            .expect("the 7\" panel is one of the screens");
+        // The dashboard sits left of it, so the panel is not number 1.
+        assert!(
+            all.len() >= 2 && n >= 1,
+            "{} screens, panel at {n}",
+            all.len()
+        );
+        // No outline spans two screens.
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert!(share_inside(a, b) < 0.5 && share_inside(b, a) < 0.5);
+            }
+        }
+        // Without a number, detection takes one of the screens, not a box around several.
+        let one = detect(&frame, 0.05, Some(&lens)).unwrap();
+        eprintln!("single {:?}", one.0.map(|p| (p.0 as i32, p.1 as i32)));
+        assert!(
+            all.iter()
+                .any(|q| share_inside(q, &one) > 0.8 && share_inside(&one, q) > 0.8),
+            "single pick is not one of the screens"
+        );
+        let corrected = lens.undistort_image(&frame);
+        let dbg = annotate(&corrected, &all[n], Source::Auto, &all);
+        let small = imageops::resize(&dbg, 1152, 648, imageops::FilterType::Triangle);
+        let _ = small.save(format!("{dir}/annotated.png"));
+    }
+
+    #[test]
+    fn finds_every_screen_in_a_lit_cluttered_frame() {
+        // The same three screens with the room lit: white desk, cables, a
+        // lamp's glare on two of the screens. Each screen is outlined on its
+        // own, and nothing else is.
+        let frame = fixture("scene05_three_screens_lit.jpg");
+        let lens = crate::lens::IMX708_WIDE.at(frame.width(), frame.height(), None);
+        let k = frame.width() as f32 / 480.0;
+        let all: Vec<Quad> = detect_all(&frame, 0.02, Some(&lens))
+            .unwrap()
+            .into_iter()
+            .map(|q| q.scaled(1.0 / k))
+            .collect();
+        for q in &all {
+            eprintln!("screen {:?}", q.0.map(|p| (p.0 as i32, p.1 as i32)));
+        }
+        assert_eq!(all.len(), 3);
+        // Left to right: dashboard, console (its centre is right of the
+        // dashboard's), 7" panel; by a box well inside each.
+        for (name, a, b) in [
+            ("dashboard", (95.0, 125.0), (190.0, 200.0)),
+            ("console", (100.0, 50.0), (200.0, 95.0)),
+            ("7in", (250.0, 105.0), (370.0, 170.0)),
+        ] {
+            let holders = all
+                .iter()
+                .filter(|q| {
+                    [a, (b.0, a.1), b, (a.0, b.1)]
+                        .iter()
+                        .all(|p| inside_quad(q, *p))
+                })
+                .count();
+            assert_eq!(holders, 1, "{name}");
+        }
+        // The default pick is one of them, not the desk around them.
+        let one = detect(&frame, 0.05, Some(&lens)).unwrap().scaled(1.0 / k);
+        assert!(
+            all.iter()
+                .any(|q| share_inside(q, &one) > 0.8 && share_inside(&one, q) > 0.8)
+        );
+    }
+
+    #[test]
+    fn finds_the_screen_in_a_rough_region() {
+        // The lit three-screen scene; boxes drawn by eye around each screen
+        // on the corrected frame at 480 px wide.
+        let frame = fixture("scene05_three_screens_lit.jpg");
+        let lens = crate::lens::IMX708_WIDE.at(frame.width(), frame.height(), None);
+        let k = frame.width() as f32 / 480.0;
+        for (name, region, inner) in [
+            // 7" panel, its lower-left corner hidden by glare and a cable.
+            (
+                "7in",
+                [205.0, 80.0, 415.0, 235.0],
+                [(250.0, 105.0), (370.0, 170.0)],
+            ),
+            (
+                "dashboard",
+                [55.0, 95.0, 225.0, 255.0],
+                [(95.0, 125.0), (190.0, 200.0)],
+            ),
+            (
+                "console",
+                [55.0, 0.0, 235.0, 125.0],
+                [(90.0, 40.0), (200.0, 95.0)],
+            ),
+        ] {
+            let q = detect_in(&frame, region.map(|v| v * k), Some(&lens)).unwrap();
+            let q = q.scaled(1.0 / k);
+            eprintln!("{name}: {:?}", q.0.map(|p| (p.0 as i32, p.1 as i32)));
+            // It holds the middle of the screen.
+            let (a, b) = (inner[0], inner[1]);
+            for p in [a, (b.0, a.1), b, (a.0, b.1)] {
+                assert!(inside_quad(&q, p), "{name}: misses {p:?}");
+            }
+            // Near the box (the console's top-right corner is out of view).
+            let (mx, my) = (0.1 * (region[2] - region[0]), 0.1 * (region[3] - region[1]));
+            for p in q.0 {
+                assert!(
+                    p.0 >= region[0] - mx
+                        && p.0 <= region[2] + mx
+                        && p.1 >= region[1] - my
+                        && p.1 <= region[3] + my,
+                    "{name}: corner {p:?} far outside the region"
+                );
+            }
+        }
+    }
+
+    /// Not a check: `TV_SCENE=<fixture> TV_REGION=x0,y0,x1,y1` (480-px
+    /// coordinates) prints what `detect_in` finds there.
+    #[test]
+    #[ignore]
+    fn dump_region() {
+        let frame = fixture(&std::env::var("TV_SCENE").unwrap());
+        let lens = crate::lens::IMX708_WIDE.at(frame.width(), frame.height(), None);
+        let k = frame.width() as f32 / 480.0;
+        let r: Vec<f32> = std::env::var("TV_REGION")
+            .unwrap()
+            .split(',')
+            .map(|v| v.parse::<f32>().unwrap() * k)
+            .collect();
+        let q = detect_in(&frame, [r[0], r[1], r[2], r[3]], Some(&lens)).unwrap();
+        eprintln!(
+            "REGION {:?}",
+            q.scaled(1.0 / k).0.map(|p| (p.0 as i32, p.1 as i32))
+        );
+    }
+
+    /// Not a check: `TV_SCENE=<fixture> cargo test dump_scene -- --ignored`
+    /// writes what detection makes of a wide-lens frame to target/screen-tests.
+    #[test]
+    #[ignore]
+    fn dump_scene() {
+        let name = std::env::var("TV_SCENE").unwrap();
+        let frame = fixture(&name);
+        let lens = crate::lens::IMX708_WIDE.at(frame.width(), frame.height(), None);
+        let dir = format!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/{}"),
+            name
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        DEBUG_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let all = detect_all(&frame, 0.02, Some(&lens)).unwrap_or_default();
+        let one = detect(&frame, 0.05, Some(&lens)).unwrap();
+        let corrected = lens.undistort_image(&frame);
+        let dbg = annotate(&corrected, &one, Source::Auto, &all);
+        let small = imageops::resize(&dbg, 1200, 675, imageops::FilterType::Triangle);
+        small.save(format!("{dir}/annotated.png")).unwrap();
+        let small = imageops::resize(&corrected, 480, 270, imageops::FilterType::Triangle);
+        small.save(format!("{dir}/corrected480.png")).unwrap();
+    }
+
+    #[test]
     fn detects_the_lcd_in_the_fixture_photos() {
         for name in [
             "scene01_dark_ui_slint.png",
@@ -1290,6 +2080,7 @@ mod tests {
             DEBUG_DIR.with(|d| *d.borrow_mut() = Some(dir));
             eprintln!("== {name}");
             let q = detect(&frame, 0.05, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+            eprintln!("chosen {name}: {:?}", q.0.map(|p| (p.0 as i32, p.1 as i32)));
             let frame_area = (frame.width() * frame.height()) as f32;
             let ratio = q.area() / frame_area;
             assert!(
@@ -1306,7 +2097,7 @@ mod tests {
                 },
                 None,
             );
-            let dbg = annotate(&frame, &q, Source::Auto);
+            let dbg = annotate(&frame, &q, Source::Auto, &[]);
             let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/screen-tests/");
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(

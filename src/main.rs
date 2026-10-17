@@ -238,6 +238,8 @@ impl Camera {
             reuse_detection: p.reuse_detection.unwrap_or(false),
             jpeg_quality: p.quality.unwrap_or(self.cli.quality),
             lens: self.lens_profile(),
+            screen: p.screen.map(|n| n as usize),
+            region: p.region,
         })
     }
 
@@ -364,6 +366,10 @@ struct ShotParams {
     raw: Option<bool>,
     /// Reuse the corners from the previous detection instead of detecting again (default false; faster when the camera does not move).
     reuse_detection: Option<bool>,
+    /// Which screen when several are in view: the number capture_debug draws on each (1 = leftmost). Finds every screen, so it takes longer; omit for the single most screen-like one.
+    screen: Option<u32>,
+    /// A rough box [x0, y0, x1, y1] around the wanted screen, in pixels of the capture_debug frame; the screen is detected inside it. A little larger than the screen is best; it need not be exact.
+    region: Option<[f32; 4]>,
     /// Four [x, y] points in pixels of the capture_debug frame, any order, overriding detection.
     manual_corners: Option<Vec<[f32; 2]>>,
     /// Width of the rectified screen image; defaults to the detected size.
@@ -617,7 +623,7 @@ impl TailvisionServer {
 
     #[tool(
         name = "capture_debug",
-        description = "Return the camera frame (with a wide-angle module's lens distortion removed) with the detected screen outline drawn on it (big dot = top-left), to check or tune the detection.",
+        description = "Return the camera frame (with a wide-angle module's lens distortion removed) with every screen found outlined in yellow and numbered from the left (pass that number as take_screenshot's screen, or a rough box around the one you want as its region), and the outline take_screenshot would use in green (big dot = top-left), to check or tune the detection.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     async fn capture_debug(
@@ -678,6 +684,14 @@ image comes out the way the camera sees it; the unit never guesses which way is 
 sideways or upside down, pass rotation_degrees (90, 180 or 270) and keep passing it. output_width \
 (800-1280) gives smaller, faster images for reading a layout; omit it to read small text. When the camera \
 has not moved, reuse_detection=true skips detection and is faster.\n\
+\n\
+Several screens. A wide-angle camera may see more than one screen. capture_debug outlines every screen it \
+finds in yellow and numbers them from the left; take_screenshot with screen=N returns that one (slower: it \
+looks for all of them). When the numbering misses the screen you want or outlines something else, look at \
+the capture_debug image yourself and pass region=[x0,y0,x1,y1], a rough box around that screen in its pixels \
+(a little larger than the screen): the screen is detected inside the box. Either way reuse_detection=true \
+keeps it while the camera stays put. Touch only reaches the device the USB cable is plugged into, so tap \
+only on that device's screen.\n\
 \n\
 When detection is off (fill far from 30-70%, corners not on the LCD, bezel or desk in the picture), call \
 capture_debug: the raw frame with the chosen outline drawn on it (big dot = top-left). Usual causes: the \
