@@ -174,27 +174,30 @@ pub async fn join(app: App, ssid: String, psk: String) {
                 .ok()
                 .and_then(|w| w.ip);
             p.internet = wait_for(Duration::from_secs(20), netmgr::internet_reachable).await;
-            let ts = tailscale::status().await;
-            if ts.is_running() {
-                // Nothing left to set up: stay on the network.
-                p.tailscale_running = true;
-                tracing::info!("already on the tailnet; staying online");
-                *app.net.hotspot_since.lock().await = None;
-                *app.net.provisioning.lock().await = Some(p);
-                app.net.switching.store(false, Ordering::SeqCst);
-                return;
+            if tailscale::status().await.is_running() {
+                return stay_online(&app, p).await;
             }
             if p.internet {
                 let _ = app.login.start().await;
-                p.auth_url = wait_for_some(Duration::from_secs(40), || async {
-                    let v = app.login.view().await;
-                    v.auth_url.or(tailscale::status().await.auth_url)
+                // A unit logged in before has no link to show: tailscaled
+                // reaches Running on its own a few seconds after the network
+                // comes up, so wait for that as well as for a link.
+                let got = wait_for_some(Duration::from_secs(40), || async {
+                    let ts = tailscale::status().await;
+                    if ts.is_running() {
+                        return Some(None);
+                    }
+                    app.login.view().await.auth_url.or(ts.auth_url).map(Some)
                 })
                 .await;
-                if p.auth_url.is_none() {
-                    p.note = Some(
-                        "Tailscale did not produce a login link in time; press Go online, or try Join again".into(),
-                    );
+                match got {
+                    Some(None) => return stay_online(&app, p).await,
+                    Some(Some(url)) => p.auth_url = Some(url),
+                    None => {
+                        p.note = Some(
+                            "Tailscale did not produce a login link in time; press Go online, or try Join again".into(),
+                        )
+                    }
                 }
             } else {
                 p.note = Some(
@@ -215,6 +218,16 @@ pub async fn join(app: App, ssid: String, psk: String) {
     }
     *app.net.provisioning.lock().await = Some(p);
     raise_hotspot(&app).await;
+    app.net.switching.store(false, Ordering::SeqCst);
+}
+
+/// Join found the unit already on the tailnet: nothing left to set up, so it
+/// stays on the network instead of returning to the hotspot.
+async fn stay_online(app: &App, mut p: Provisioning) {
+    p.tailscale_running = true;
+    tracing::info!("already on the tailnet; staying online");
+    *app.net.hotspot_since.lock().await = None;
+    *app.net.provisioning.lock().await = Some(p);
     app.net.switching.store(false, Ordering::SeqCst);
 }
 
